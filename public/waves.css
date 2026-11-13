@@ -43,7 +43,19 @@ sub, sup { font-size: 0.65em; }
 .live .hud {
   display: block; position: fixed; z-index: 1;
   left: max(16px, env(safe-area-inset-left, 0px)); bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-  max-width: calc(100% - 32px); pointer-events: none;
+  max-width: calc(100% - 32px - 120px); pointer-events: none;   /* clear of the waves button */
   font: 500 11.5px/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--muted);
 }
 @media (max-width: 560px) { .live .hud { display: none; } }
+
+/* Switch between the wave field and the plain page. */
+.mode {
+  position: fixed; z-index: 2;
+  right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  font: 500 12px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--fg); background: var(--bg);
+  border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); border-radius: 999px;
+  padding: 7px 12px; cursor: pointer;
+}
+.mode:hover { border-color: var(--neg); }
+.mode:focus-visible { outline: 2px solid var(--neg); outline-offset: 2px; }

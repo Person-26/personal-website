@@ -69,6 +69,7 @@ const root = document.documentElement;
 const canvas = document.getElementById('field');
 const doc = document.getElementById('content');
 const hudText = document.getElementById('hud-text');
+const modeButton = document.getElementById('mode');
 const reduce = matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
 
@@ -753,6 +754,7 @@ function loop() { if (!raf) raf = requestAnimationFrame(tick); }
 let lastFrame = 0, slowFrames = 0;
 function tick(now) {
   raf = 0;
+  if (!R) return;                             // waves switched off
   if (lastFrame && now - lastFrame < 250) {   // adaptive resolution for slow GPUs
     slowFrames = now - lastFrame > 30 ? slowFrames + 1 : Math.max(0, slowFrames - 1);
     if (slowFrames > 24 && Nx * Ny > (1 << 18)) {
@@ -777,8 +779,9 @@ function tick(now) {
   if (more) loop();
 }
 
-addEventListener('scroll', () => { moved = true; loop(); }, { passive: true });
+addEventListener('scroll', () => { if (R) { moved = true; loop(); } }, { passive: true });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (!R) return;
   readColors();
   changeDrive(performance.now());   // a new palette is a new target
   loop();
@@ -799,7 +802,7 @@ function glideStep(now) {
 }
 function enableGlide() {
   addEventListener('wheel', e => {
-    if (reduce.matches || e.ctrlKey || e.defaultPrevented || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    if (!R || reduce.matches || e.ctrlKey || e.defaultPrevented || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
     e.preventDefault();
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
     if (!glide.raf) { glide.pos = glide.target = scrollY; glide.last = performance.now(); }
@@ -825,24 +828,46 @@ function layout() {
   setPhysics();
 }
 
-function start() {
+// Waves on: the canvas draws the page, formed from scratch by the drives. Off: the plain page,
+// with the simulation stopped and its GPU memory freed. The choice is remembered.
+function setWaves(on, settled) {
+  modeButton.setAttribute('aria-pressed', String(on));
+  modeButton.textContent = on ? 'Waves: on' : 'Waves: off';
+  try { localStorage.setItem('waves', on ? 'on' : 'off'); } catch (e) { /* not stored */ }
+  if (!on) {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    stopGlide();
+    root.classList.remove('live');
+    freeResources();
+    return;
+  }
   root.classList.add('live');
   readColors();
   try { layout(); } catch (e) {
     console.warn('waves: falling back to the plain page', e);
     root.classList.remove('live');
     freeResources();
+    modeButton.hidden = true;
     return;
   }
-  changeDrive(performance.now(), params.has('still'));   // the drives switch on at load
+  moved = false; lastFrame = 0; lockTime = 0;
+  changeDrive(performance.now(), settled);
   loop();
+}
+
+function start() {
+  let on = true;
+  try { on = localStorage.getItem('waves') !== 'off'; } catch (e) { /* default on */ }
+  modeButton.hidden = false;
+  modeButton.addEventListener('click', () => setWaves(!R));
+  setWaves(on, params.has('still'));   // the drives switch on at load
   enableGlide();
 
   let timer = 0;
   addEventListener('resize', () => {
     clearTimeout(timer);
     timer = setTimeout(() => {
-      if (canvas.clientWidth === Lx && canvas.clientHeight === Ly) return;
+      if (!R || (canvas.clientWidth === Lx && canvas.clientHeight === Ly)) return;
       layout();
       changeDrive(performance.now(), true);   // a new box: start already standing
       loop();
@@ -850,7 +875,12 @@ function start() {
   });
 }
 
-canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); root.classList.remove('live'); });
+canvas.addEventListener('webglcontextlost', e => {
+  e.preventDefault();
+  root.classList.remove('live');
+  R = null;
+  modeButton.hidden = true;
+});
 
 (document.fonts ? document.fonts.ready : Promise.resolve()).then(start);
 })();
