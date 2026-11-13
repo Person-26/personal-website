@@ -3,5 +3,9 @@
   "name": "personal-website",
   "compatibility_date": "2026-11-10",
   "observability": { "enabled": true },
-  "assets": { "directory": "./public" }
+  "assets": { "directory": "./public" },
+  "routes": [
+    { "pattern": "perrycai.dev", "custom_domain": true },
+    { "pattern": "www.perrycai.dev", "custom_domain": true }
+  ]
 }
