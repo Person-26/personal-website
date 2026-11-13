@@ -45,7 +45,8 @@
 (() => {
 'use strict';
 
-const RHO = 0.62;          // band limit: fraction of the grid's Nyquist wavenumber kept
+const RHO = 0.8;           // band limit: fraction of the grid's Nyquist wavenumber kept
+const DENSITY = 0.55;      // grid points per CSS px wanted (rounded to a power of two)
 const EPS = 0.06;          // how close the finest in-slice mode sits to cutoff
 // Each component's carrier has its own hidden wavenumber mu_c (a fraction of K): it acts as a
 // mass in the slice, so the colours disperse differently. Kept small so that even broad
@@ -55,7 +56,7 @@ const T_ARRIVE = 4.0;      // s: from a drive change to the slice holding it
 const T_LATE = 1.0;        // s: the most a slow mode may arrive after T_ARRIVE
 const TAPER = 0.75;        // the band limit rolls off smoothly from this fraction of it
 const SLEW = 0.6;          // s: time constant with which the drives take up a change
-const IN_FLIGHT = 4;       // drive changes travelling at once
+const IN_FLIGHT = 2;       // drive changes travelling at once
 const STEP_GAP = 220;      // ms: at most one drive change per this interval while scrolling
 const LOCK_LO = 0.85, LOCK_HI = 0.97;   // SSIM over which an area goes from unlocked to locked
 const LOCK_RISE = 1.5;     // s: fade from the simulation to the full-resolution page
@@ -115,10 +116,11 @@ const FS_SPEC = HEAD + KVEC + `
 uniform sampler2D G;
 uniform float kc;
 void main() {
+  float m = sqrt(float(4 * N.x * N.y));      // stored / sqrt(M): fits half precision
   ivec2 n = ivec2(gl_FragCoord.xy);
   float r = length(kvec(n)) / kc;            // raised-cosine roll-off: no ringing at the band edge
   float t = clamp((r - ${TAPER}) / (1.0 - ${TAPER}), 0.0, 1.0);
-  o = texelFetch(G, n, 0) * (0.5 + 0.5 * cos(3.14159265 * t));
+  o = texelFetch(G, n, 0) * (0.5 + 0.5 * cos(3.14159265 * t)) / m;
 }`;
 
 // A change's spectrum with each mode's current phase slip, ready for the inverse FFT
@@ -147,7 +149,7 @@ void main() {
   vec2 zm = texelFetch(Z, ivec3((2 * N - n) % (2 * N), la), 0).xy;    // Z1(-k)
   vec2 x1 = 0.5 * ((w.x + w.y) * z.xy + (w.x - w.y) * conj(zm));  // E_x, E_y separated
   vec2 x2 = w.z * z.zw;
-  o = vec4(conj(x1), conj(x2)) / float(4 * N.x * N.y);
+  o = vec4(conj(x1), conj(x2)) / sqrt(float(4 * N.x * N.y));
 }`;
 
 // One radix-2 Stockham pass on two complex numbers per texel.
@@ -270,6 +272,9 @@ void main() {
   o = vec4(a + clamp(want - a, -fall, rise), 0.0, 0.0, 0.0);
 }`;
 
+// The screen. The field between grid points is what the band-limited mode sum gives there, so
+// it is reconstructed with a Lanczos-3 (windowed sinc) kernel rather than bilinearly, across the
+// walls by the field's own mirror symmetry (E_x, E_z odd; E_y even).
 const FS_DISPLAY = HEAD + `
 uniform sampler2D F, A, H;     // field, lock, full-resolution page
 uniform ivec2 N;
@@ -277,14 +282,42 @@ uniform vec2 res;
 uniform vec3 bg;
 uniform float fy;              // fraction of a grid row the page is past the composite
 uniform float hshift;          // device px the page has moved since H was drawn
-vec4 E(ivec2 i) { return vec4(texelFetch(F, clamp(i, ivec2(0), N - 1), 0).rgb, texelFetch(A, clamp(i, ivec2(0), N - 1), 0).r); }
+vec3 E(int x, int y) {
+  x = clamp(x, 0, N.x - 1);
+  float s = 1.0;
+  if (y < 0) { y = -y; s = -1.0; }
+  if (y > N.y) { y = 2 * N.y - y; s = -1.0; }
+  float odd = y == N.y ? 0.0 : s;
+  vec3 v = texelFetch(F, ivec2(x, min(y, N.y - 1)), 0).rgb;
+  return vec3(odd * v.r, v.g, odd * v.b);
+}
+float lz(float x) {
+  x = abs(x);
+  if (x < 1e-4) return 1.0;
+  if (x >= 3.0) return 0.0;
+  float p = 3.14159265 * x;
+  return 3.0 * sin(p) * sin(p / 3.0) / (p * p);
+}
+float L(ivec2 i) { return texelFetch(A, clamp(i, ivec2(0), N - 1), 0).r; }
 void main() {
   vec2 g = vec2(gl_FragCoord.x / res.x * float(N.x), (1.0 - gl_FragCoord.y / res.y) * float(N.y) + fy);
   ivec2 i = ivec2(floor(g)); vec2 f = fract(g);
-  vec4 e = mix(mix(E(i), E(i + ivec2(1, 0)), f.x), mix(E(i + ivec2(0, 1)), E(i + ivec2(1, 1)), f.x), f.y);
-  vec3 sim = clamp(bg + e.rgb, 0.0, 1.0);
+  float wx[6], wy[6], sx = 0.0, sy = 0.0;
+  for (int k = 0; k < 6; k++) {
+    wx[k] = lz(f.x - float(k - 2)); sx += wx[k];
+    wy[k] = lz(f.y - float(k - 2)); sy += wy[k];
+  }
+  vec3 e = vec3(0.0);
+  for (int b = 0; b < 6; b++) {
+    vec3 r = vec3(0.0);
+    for (int a = 0; a < 6; a++) r += wx[a] * E(i.x + a - 2, i.y + b - 2);
+    e += wy[b] * r;
+  }
+  e /= sx * sy;
+  vec3 sim = clamp(bg + e, 0.0, 1.0);
+  float lock = mix(mix(L(i), L(i + ivec2(1, 0)), f.x), mix(L(i + ivec2(0, 1)), L(i + ivec2(1, 1)), f.x), f.y);
   vec2 q = vec2(gl_FragCoord.x, res.y - gl_FragCoord.y + hshift);
-  float lock = q.y >= 0.0 && q.y < res.y ? clamp(e.a, 0.0, 1.0) : 0.0;
+  lock = q.y >= 0.0 && q.y < res.y ? clamp(lock, 0.0, 1.0) : 0.0;
   vec3 hi = texture(H, q / res).rgb;
   o = vec4(mix(sim, hi, lock * lock * (3.0 - 2.0 * lock)), 1.0);
 }`;
@@ -415,7 +448,7 @@ function allocate() {
   R = {
     ext: [target(2 * Nx, 2 * Ny), target(2 * Nx, 2 * Ny)],
     T: layers(Nx, Ny, IN_FLIGHT + 2),            // target pages (colour minus background)
-    Z: layers(2 * Nx, 2 * Ny, IN_FLIGHT + 1, true),   // spectrum of each change (+ scratch)
+    Z: layers(2 * Nx, 2 * Ny, IN_FLIGHT + 1),    // spectrum of each change (+ scratch), / sqrt(M)
     F: layers(Nx, Ny, IN_FLIGHT),                // each change on the slice, this frame
     G: layers(Nx, Ny, IN_FLIGHT),                // ... and once settled
     base: target(Nx, Ny, true),                  // field of the settled drive
@@ -440,9 +473,9 @@ function setPhysics() {
 }
 
 // Blackman-windowed sinc with cutoff 0.8 of the grid's Nyquist wavenumber: flat up to the band
-// limit (RHO = 0.62), so it leaves band-limited fields alone and only reshapes cuts.
+// limit's roll-off, so it leaves band-limited fields alone and only reshapes cuts.
 const wallKernel = (() => {
-  const fc = 0.8, h = new Float32Array(WALL + 1);
+  const fc = 0.93, h = new Float32Array(WALL + 1);
   let sum = 0;
   for (let k = 0; k <= WALL; k++) {
     const sinc = k === 0 ? fc : Math.sin(Math.PI * fc * k) / (Math.PI * k);
@@ -784,7 +817,8 @@ function layout() {
   canvas.width = Math.round(Lx * dpr);
   canvas.height = Math.round(Ly * dpr);
   const cap = Math.min(2048, pow2AtLeast(+params.get('grid') || 2048));   // ?grid=512 caps resolution
-  let nx = Math.min(cap, pow2AtLeast(0.9 * Lx)), ny = Math.min(cap, pow2AtLeast(0.9 * Ly));
+  const pow2Near = v => 1 << Math.max(1, Math.round(Math.log2(v)));
+  let nx = Math.min(cap, pow2Near(DENSITY * Lx)), ny = Math.min(cap, pow2Near(DENSITY * Ly));
   while (nx * ny > maxPoints) { if (nx / Lx > ny / Ly) nx /= 2; else ny /= 2; }
   Nx = nx; Ny = ny;
   allocate();
