@@ -33,7 +33,10 @@
 // held by the sheets sending it continuously at the carrier frequency (every mode q crossing the
 // slice at k_z = sqrt(K^2 - q^2), which is why the band limit sits below K); nothing of it is
 // stored, so it lasts only until the last wavefront sent has crossed the gap, broad shapes first,
-// fine detail (grazing) last. A pulse still on its way when let go runs on freely by the same
+// fine detail (grazing) last. So a drive change while the drive is running is a switch-over: the
+// currents send the new page at once, and each mode of it reaches the slice just as the old one's
+// last wavefront passes, the same delay (only from nothing, at load or for a new wavelength, is
+// the page sent as a focusing pulse). A pulse still on its way when let go runs on freely by the same
 // formula, tau now negative: it spreads out of the slice in z and runs out
 // across the edges of the screen, the time mirror of how it arrived. (A change let go before it arrived
 // keeps going too: its waves still focus, then run on out.) Once a mode has moved a whole screen
@@ -175,6 +178,7 @@ uniform sampler2DArray Z;
 uniform int la, part;          // the change's slot; 0: (E_x, E_y), 1: E_z
 uniform float c, K, age, T, sheet, sig, dmax;
 uniform float off;             // s after the start when its drive let go of it (>= 1e8: never)
+uniform int cw;                // 1: switched over from a running drive, not sent as a pulse
 vec2 conj(vec2 z) { return vec2(z.x, -z.y); }
 vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 vec2 cis(float a) { return vec2(cos(a), sin(a)); }
@@ -191,7 +195,15 @@ void main() {
   vec2 k = kvec(n);
   float m = length(k);
   float tau = T - age, env = 1.0;
-  if (age < T) {
+  // Each mode's light crosses the gap from the sheets along z at c k_z / K.
+  float cross = sheet * K / sqrt(max(K * K - m * m, 1e-4 * K * K));
+  if (cw == 1) {
+    // The currents switched to this page while running: its light comes right behind the old
+    // page's, each mode taking over as the old one's last wavefront passes, broad shapes first.
+    tau = 0.0;
+    env = smoothstep(cross - 0.15, cross + 0.15, age);
+    if (off < 1e8) env *= 1.0 - smoothstep(cross - 0.15, cross + 0.15, age - off);
+  } else if (age < T) {
     // Light from the current sheets above and below needs sheet s to reach the slice.
     env = smoothstep(0.5 * sheet, 1.5 * sheet, age);
   } else if (off < T) {
@@ -204,8 +216,7 @@ void main() {
     // currents stop, the field lasts until the last wavefront they sent has crossed the gap,
     // whose edge moves along z at c k_z / K: broad shapes go first, fine detail (grazing) last.
     tau = 0.0;
-    float gone = sheet * K / sqrt(max(K * K - m * m, 1e-4 * K * K));
-    env = 1.0 - smoothstep(gone - 0.15, gone + 0.15, age - off);
+    env = 1.0 - smoothstep(cross - 0.15, cross + 0.15, age - off);
   }
   // Moved a whole screen away in x or y it is all in the padding, off the screen: drop it there,
   // before the periodic transform could bring it back. Whatever of a released field is left
@@ -437,7 +448,7 @@ function run(prog, fbo, w, h, tex, set) {
 let Lx = 0, Ly = 0, Nx = 0, Ny = 0;
 let wavelength = WAVELENGTH;
 let margins = [0, 0];   // CSS px: where the text column starts and ends (the drive currents fill the rest)
-const phys = { kc: 0, K: 0, c: 0, done: 0 };
+const phys = { kc: 0, K: 0, c: 0, done: 0, swap: 0 };
 let R = null;
 // Every change the drives have made that is still on the slice, oldest first: its page was
 // captured with the page scrolled to grid row `row`, it started at t, and `off` is when a
@@ -479,7 +490,8 @@ function setPhysics() {
   const kc = Math.min(bandFor(wavelength), 0.5 * RHO * Math.PI * Math.min(Nx / Lx, Ny / Ly));
   const K = Math.sqrt(1 + EPS) * kc;
   const c = 0.95 * Lx / T_ARRIVE;                  // the fastest waves cross the width in T
-  Object.assign(phys, { kc, K, c, done: T_ARRIVE + 0.05 });
+  // done: a pulse has arrived; swap: every mode of a switch-over has crossed (finest last).
+  Object.assign(phys, { kc, K, c, done: T_ARRIVE + 0.05, swap: SHEET * K / Math.sqrt(K * K - kc * kc) + 0.2 });
 }
 
 // ---------------------------------------------------------------- page -> drive
@@ -595,7 +607,7 @@ function coefFor(slot, row) {
 }
 
 // The change in `slot`, `age` seconds after it started, into the slot's layers of `dst` (R.F or R.G).
-function fieldOf(slot, age, dst, off = 1e9) {
+function fieldOf(slot, age, dst, off = 1e9, cw = false) {
   for (const part of [0, 1]) {
     run(P.evolve, R.ext[0].f, 2 * Nx, 2 * Ny, { Z: [gl.TEXTURE_2D_ARRAY, R.Z.t] }, u => {
       gl.uniform2i(u.N, Nx, Ny);
@@ -604,6 +616,7 @@ function fieldOf(slot, age, dst, off = 1e9) {
       gl.uniform1f(u.c, phys.c); gl.uniform1f(u.K, phys.K); gl.uniform1f(u.age, age);
       gl.uniform1f(u.T, T_ARRIVE); gl.uniform1f(u.sheet, SHEET);
       gl.uniform1f(u.sig, SIGMA); gl.uniform1f(u.dmax, D_MAX); gl.uniform1f(u.off, off);
+      gl.uniform1i(u.cw, cw ? 1 : 0);
     });
     const F = fft2();
     run(P.unpack, dst.fbos[2 * slot + part], Nx, Ny, { F });
@@ -612,18 +625,21 @@ function fieldOf(slot, age, dst, off = 1e9) {
 
 const ageOf = (s, now) => (now - s.t) / 1000;
 const isCur = (s, now) => s.off > now;
-const isHeld = (s, now) => isCur(s, now) && ageOf(s, now) > phys.done;
+const doneOf = s => s.cw ? phys.swap : phys.done;
+const isHeld = (s, now) => isCur(s, now) && ageOf(s, now) > doneOf(s);
 const offOf = s => s.off === Infinity ? 1e9 : (s.off - s.t) / 1000;
 // Let go of, and every mode out through the ends (or dropped) by now.
-const isGone = (s, now) => !isCur(s, now) &&
-  now - Math.max(s.off, s.t + 1000 * T_ARRIVE) > 1000 * D_MAX + 50;
+// (A steady field, or one switched over, is gone once its last mode has crossed.)
+const isGone = (s, now) => !isCur(s, now) && (s.cw || offOf(s) >= T_ARRIVE
+  ? now - s.off > 1000 * phys.swap + 50
+  : now - Math.max(s.off, s.t + 1000 * T_ARRIVE) > 1000 * D_MAX + 50);
 
 // Switch the drives to the current page. False if there is no room yet (try again later).
 function changeDrive(now, settled) {
   steps = steps.filter(s => !isGone(s, now));
   const row = rowNow();
   if (settled || reduce.matches) {          // jump straight to the standing wave
-    const s = { row, t: now - 1e5, slot: 0, off: Infinity };
+    const s = { row, t: now - 1e5, slot: 0, off: Infinity, cw: false };
     capture(0, row);
     coefFor(0, row);
     fieldOf(0, 1e6, R.G);
@@ -633,7 +649,7 @@ function changeDrive(now, settled) {
     const used = new Set(steps.map(s => s.slot));
     let slot = 0;
     while (used.has(slot)) slot++;
-    const young = last && isCur(last, now) && ageOf(last, now) < 0.5 * T_ARRIVE;
+    const young = last && isCur(last, now) && ageOf(last, now) < 0.5 * doneOf(last);
     if (young || (slot >= SLOTS && last && isCur(last, now) && !isHeld(last, now))) {
       // The change being driven has only just started (or there is no room for another): it
       // takes the latest page and keeps its start time.
@@ -644,8 +660,11 @@ function changeDrive(now, settled) {
     } else if (slot >= SLOTS) {
       return false;
     } else {
+      // With a drive running, the currents switch over and the new light follows the old;
+      // from nothing (first load, new wavelength), the page is sent in as a focusing pulse.
+      const cw = steps.some(o => isCur(o, now));
       for (const o of steps) if (isCur(o, now)) o.off = now;   // let go of what it held
-      const s = { row, t: now, slot, off: Infinity };
+      const s = { row, t: now, slot, off: Infinity, cw };
       capture(0, row);
       coefFor(slot, row);                   // the whole page, sent in by the currents
       fieldOf(slot, 1e6, R.G);
@@ -667,8 +686,8 @@ function compositeInto(fbo, rowC, now) {
       slot[i] = s.slot; shift[i] = rowC - s.row;
       held[i] = isHeld(s, now) ? 1 : 0;
       const a = ageOf(s, now), x = Math.min(1, Math.max(0, (a - 0.75 * T_ARRIVE) / (phys.done - 0.75 * T_ARRIVE)));
-      gpart[i] = isCur(s, now) ? x * x * (3 - 2 * x) : 0;
-      coming[i] = a < T_ARRIVE ? 1 : 0;
+      gpart[i] = isCur(s, now) && !s.cw ? x * x * (3 - 2 * x) : 0;
+      coming[i] = !s.cw && a < T_ARRIVE ? 1 : 0;
     });
     gl.uniform1i(u.count, steps.length);
     gl.uniform1iv(u.slot, slot); gl.uniform1iv(u.shift, shift);
@@ -682,7 +701,7 @@ function composite(now) {
   const rows = scrollY * Ny / Ly, rowC = Math.floor(rows);
   fy = rows - rowC;
   steps = steps.filter(s => !isGone(s, now));
-  for (const s of steps) if (!isHeld(s, now)) fieldOf(s.slot, ageOf(s, now), R.F, offOf(s));
+  for (const s of steps) if (!isHeld(s, now)) fieldOf(s.slot, ageOf(s, now), R.F, offOf(s), s.cw);
   compositeInto(R.comp.f, rowC, now);
 }
 
@@ -711,7 +730,7 @@ function draw() {
 function hud(now) {
   const last = steps[steps.length - 1];
   const since = last ? ageOf(last, now) : Infinity;
-  const arrived = Math.min(1, since / phys.done);
+  const arrived = Math.min(1, since / (last ? doneOf(last) : 1));
   hudText.textContent =
     `(R, G, B) = background ± (|Eₓ|, |E_y|, |E_z|) on the slice z = 0 · wavelength ${Math.round(2 * Math.PI / phys.K)} px · ` +
     `${arrived >= 1 ? 'standing' : `${Math.round(100 * arrived)}% arrived`}`;
