@@ -27,8 +27,11 @@
 // padding, not back in), y is mirrored (odd for E_x, E_z; even for E_y: the walls). E_x + i E_y
 // share one complex FFT; their spectra are separated with Z(-k) when each gets its own phase.
 // The field scrolls with the page: every stored field keeps the grid row it was made at and is
-// read shifted by how far the page has moved since, so a drive change is the new page minus
-// the shifted old one, and only what newly enters (or no longer lines up) has to form.
+// read shifted by how far the page has moved since. The box is open (left, right and the far
+// field), so a standing wave only lasts while the drives feed it. A drive change stops feeding
+// everything the old drive held, which then leaks away with time constant TAU_LOSS, and sends in
+// the whole current page, moved text included: after a scroll the moved text fades and is
+// rebuilt by the new waves along with whatever came into view.
 // Moving a field cuts it at the top and bottom walls, which no field in the box can do: there
 // the tangential components E_x, E_z must vanish. So after every move the field is projected
 // back onto the box's modes in y (sine for E_x, E_z; cosine for E_y), band-limited. Away from
@@ -53,6 +56,7 @@ const EPS = 0.06;          // how close the finest in-slice mode sits to cutoff
 // shapes travel at close to c and really arrive from the sides.
 const MU = [0.08, 0.2, 0.34];  // E_x, E_y, E_z
 const T_ARRIVE = 4.0;      // s: from a drive change to the slice holding it
+const TAU_LOSS = 2.0;      // s: an unfed standing wave leaks out of the open box
 const T_LATE = 1.0;        // s: the most a slow mode may arrive after T_ARRIVE
 const TAPER = 0.75;        // the band limit rolls off smoothly from this fraction of it
 const SLEW = 0.6;          // s: time constant with which the drives take up a change
@@ -182,34 +186,39 @@ void main() {
 // The slice now: the settled field plus every drive change still travelling, each read where
 // the page has moved it since it was made.
 const FS_COMPOSITE = HEAD + `
-uniform sampler2D base;
-uniform sampler2DArray F, G;  // each change now, and once settled
+uniform sampler2D fed, fade;   // settled field the drive holds; unfed fields leaking away
+uniform sampler2DArray F, G;   // each change now, and once arrived
 uniform ivec2 N;
-uniform int goal;              // 1: the settled picture (every change arrived) instead of now
+uniform int goal;              // 1: what it will settle to instead of now
+uniform int fedShift, fadeShift;   // rows the page has moved since each was made
+uniform float fedAmp, fadeAmp;
 uniform int count;             // drive changes in flight
-uniform int baseShift;         // rows the page has moved since the settled field was made
 uniform int slot[${IN_FLIGHT}];
 uniform int shift[${IN_FLIGHT}];
 uniform float age[${IN_FLIGHT}];
+uniform float amp[${IN_FLIGHT}];   // 1 while its drive is on, then leaking away
 uniform float arrive, done;
+vec3 at(sampler2D t, int s, ivec2 n) {
+  int y = n.y + s;
+  return y >= 0 && y < N.y ? texelFetch(t, ivec2(n.x, y), 0).rgb : vec3(0.0);
+}
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  vec3 e = vec3(0.0);
-  int yb = n.y + baseShift;
-  if (yb >= 0 && yb < N.y) e = texelFetch(base, ivec2(n.x, yb), 0).rgb;
+  vec3 e = fedAmp * at(fed, fedShift, n);
+  if (goal == 0) e += fadeAmp * at(fade, fadeShift, n);
   for (int j = 0; j < ${IN_FLIGHT}; j++) {
     if (j >= count) break;
     int y = n.y + shift[j];
     if (y < 0 || y >= N.y) continue;
     ivec3 q = ivec3(n.x, y, slot[j]);
     vec3 g = texelFetch(G, q, 0).rgb;
-    if (goal == 1) { e += g; continue; }
+    if (goal == 1) { e += amp[j] < 1.0 ? vec3(0.0) : g; continue; }
     // The waves still in flight were made in this change's own frame; where the page has moved
     // that frame's edge onto the screen, let them fade out instead of stopping at a line
+    // (its arrived part comes in there as it arrives).
     float edge = shift[j] > 0 ? float(N.y - 1 - y) : shift[j] < 0 ? float(y) : 1e9;
-    // (Its settled part comes in there as it arrives.)
     float t = smoothstep(0.0, 40.0, edge);
-    e += t * texelFetch(F, q, 0).rgb + (1.0 - t) * smoothstep(0.75 * arrive, done, age[j]) * g;
+    e += amp[j] * (t * texelFetch(F, q, 0).rgb + (1.0 - t) * smoothstep(0.75 * arrive, done, age[j]) * g);
   }
   o = vec4(e, 0.0);
 }`;
@@ -428,16 +437,19 @@ function run(prog, fbo, w, h, tex, set) {
 let Lx = 0, Ly = 0, Nx = 0, Ny = 0;
 const phys = { kc: 0, K: 0, c: 0, mu: new Float32Array(3), done: 0 };
 let R = null;
-// steps[0] is the settled drive (its field is R.base); the rest are drive changes in flight.
-// Each has a target page (layer tl of R.T) captured with the page scrolled to grid row `row`.
-let steps = [];        // { tl, row, t: ms, slot }
+// The drive changes in flight, oldest first. Each has a target page (layer tl of R.T) captured
+// with the page scrolled to grid row `row`; `off` is when a newer change stopped feeding it.
+let steps = [];        // { tl, row, t: ms, slot, off: ms }
+// R.fed: the arrived field the current drive holds (made at fedRow; fedOn: is there one).
+// R.fade: fields no drive holds any more, leaking away: amplitude exp(-(now - fadeT) / TAU_LOSS).
+let fedRow = 0, fedOn = false, fadeRow = 0, fadeT = -1e12;
 let raf = 0, moved = false, lastStep = -1e9, colors = null;
 
 function pow2AtLeast(n) { return 1 << Math.ceil(Math.log2(Math.max(2, n))); }
 
 function freeResources() {
   if (!R) return;
-  for (const r of [R.ext[0], R.ext[1], R.base, R.base2, R.comp, R.comp2, R.goal, R.goal2, R.score, R.lock[0], R.lock[1]]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
+  for (const r of [R.ext[0], R.ext[1], R.fed, R.fed2, R.fade, R.fade2, R.comp, R.comp2, R.goal, R.goal2, R.score, R.lock[0], R.lock[1]]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
   for (const s of [R.T, R.Z, R.F, R.G]) { gl.deleteTexture(s.t); s.fbos.forEach(f => gl.deleteFramebuffer(f)); }
   gl.deleteTexture(R.hi);
   R = null;
@@ -452,8 +464,8 @@ function allocate() {
     Z: layers(2 * Nx, 2 * Ny, IN_FLIGHT + 1),    // spectrum of each change (+ scratch), / sqrt(M)
     F: layers(Nx, Ny, IN_FLIGHT),                // each change on the slice, this frame
     G: layers(Nx, Ny, IN_FLIGHT),                // ... and once settled
-    base: target(Nx, Ny, true),                  // field of the settled drive
-    base2: target(Nx, Ny, true),
+    fed: target(Nx, Ny, true), fed2: target(Nx, Ny, true),     // arrived field the drive holds
+    fade: target(Nx, Ny, true), fade2: target(Nx, Ny, true),   // unfed fields leaking away
     comp: target(Nx, Ny, true),                  // the slice now, moved
     comp2: target(Nx, Ny, true),                 // ... and meeting the walls
     goal: target(Nx, Ny, true),                  // the settled picture, moved
@@ -462,7 +474,7 @@ function allocate() {
     lock: [target(Nx, Ny, true), target(Nx, Ny, true)],   // handover to full resolution
     hi: hiTexture(),                             // the page at full resolution
   };
-  steps = [{ tl: 0, row: 0, t: -1e12, slot: -1 }];   // target layer 0 starts at zero: drives off
+  steps = []; fedOn = false; fadeT = -1e12;           // drives off
 }
 
 function setPhysics() {
@@ -627,44 +639,61 @@ function fieldOf(layer, age, fbo) {
   run(P.unpack, fbo, Nx, Ny, { F });
 }
 
-// The oldest change in flight has arrived: fold it into the settled field (moved to its row).
-function settleOldest() {
-  const s = steps[1];
-  fieldOf(s.slot, 1e6, R.F.fbos[s.slot]);
-  compositeInto(R.base2.f, s.row, [s]);
-  walls(R.base2.t, R.base.f);
-  steps.shift();
-  steps[0].slot = -1;
+const fadeAmp = now => Math.exp(-Math.max(0, now - fadeT) / 1000 / TAU_LOSS);
+const ampOf = (s, now) => s.off > now ? 1 : Math.exp(-(now - s.off) / 1000 / TAU_LOSS);
+
+// Store the field `parts` (see compositeInto) at the current row into R.fed or R.fade.
+function store(into, parts, now) {
+  const row = Math.floor(scrollY * Ny / Ly);
+  compositeInto(R.comp.f, row, parts.live || [], { fed: parts.fed ? 1 : 0, fade: parts.fade ? fadeAmp(now) : 0, now: 1e15 });
+  if (into === 'fed') { walls(R.comp.t, R.fed2.f); [R.fed, R.fed2] = [R.fed2, R.fed]; fedRow = row; }
+  else { walls(R.comp.t, R.fade2.f); [R.fade, R.fade2] = [R.fade2, R.fade]; fadeRow = row; fadeT = now; }
 }
+
+// The oldest change in flight has arrived. If its drive is still on, it is now the field the
+// drive holds; if not, it joins the fields leaking away.
+function settleOldest(now) {
+  const s = steps[0];
+  fieldOf(s.slot, 1e6, R.F.fbos[s.slot]);
+  if (s.off > now) { store('fed', { live: [s] }, now); fedOn = true; }
+  else store('fade', { fade: true, live: [{ ...s, ampNow: ampOf(s, now) }] }, now);
+  steps.shift();
+}
+const arrived = (s, now) => (now - s.t) / 1000 > phys.done;
 
 // Switch the drives to the current page.
 function changeDrive(now, settled) {
-  while (steps.length > 1 && (now - steps[1].t) / 1000 > phys.done) settleOldest();
+  while (steps.length && arrived(steps[0], now)) settleOldest(now);
   const row = rowNow();
   if (settled || reduce.matches) {          // jump straight to the standing wave
-    const s = { tl: steps[0].tl === 0 ? 1 : 0, row, t: -1e12, slot: -1 };
-    capture(s.tl, row);
-    steps = [s];
+    const s = { tl: 0, row, t: -1e12, slot: -1 };
+    capture(0, row);
+    steps = [];
     coefFor(s, null, IN_FLIGHT);
-    fieldOf(IN_FLIGHT, 1e6, R.base.f);
+    fieldOf(IN_FLIGHT, 1e6, R.fed.f);
+    fedRow = row; fedOn = true; fadeT = -1e12;
     for (const l of R.lock) { gl.bindFramebuffer(gl.FRAMEBUFFER, l.f); gl.clearColor(1, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
     lockRow = Math.floor(scrollY * Ny / Ly);
-  } else if (steps.length - 1 >= IN_FLIGHT) {
-    // Every slot is busy: the newest change takes the latest page and keeps its start time,
-    // rather than forcing the oldest change to finish early.
+  } else if (steps.length >= IN_FLIGHT && steps[steps.length - 1].off > now) {
+    // Every slot is busy: the newest change, still the one being driven, takes the latest page
+    // and keeps its start time.
     const s = steps[steps.length - 1];
     s.row = row;
     capture(s.tl, row);
-    coefFor(s, steps[steps.length - 2], s.slot);
+    coefFor(s, null, s.slot);
     fieldOf(s.slot, 1e6, R.G.fbos[s.slot]);
   } else {
+    // The old drive stops: what it held, arrived or on its way, starts leaking away.
+    if (fedOn) { store('fade', { fed: true, fade: true }, now); fedOn = false; }
+    for (const o of steps) if (o.off > now) o.off = now;
+    while (steps.length >= IN_FLIGHT) settleOldest(now);
     const usedT = new Set(steps.map(s => s.tl)), usedS = new Set(steps.map(s => s.slot));
     let tl = 0, slot = 0;
     while (usedT.has(tl)) tl++;
     while (usedS.has(slot)) slot++;
-    const s = { tl, row, t: now, slot };
+    const s = { tl, row, t: now, slot, off: Infinity };
     capture(tl, row);
-    coefFor(s, steps[steps.length - 1], slot);
+    coefFor(s, null, slot);                 // the whole page, sent in from the sides
     fieldOf(slot, 1e6, R.G.fbos[slot]);
     steps.push(s);
   }
@@ -672,16 +701,22 @@ function changeDrive(now, settled) {
   lastStep = now;
 }
 
-// The slice with the page at grid row rowC: the settled field plus the changes `live`
-// (their fields already in R.F).
-function compositeInto(fbo, rowC, live, goal, now) {
-  run(P.composite, fbo, Nx, Ny, { base: R.base.t, F: [gl.TEXTURE_2D_ARRAY, R.F.t], G: [gl.TEXTURE_2D_ARRAY, R.G.t] }, u => {
+// The slice with the page at grid row rowC: the held field, the fields leaking away, and the
+// changes `live` (their fields already in R.F). opt: { goal, fed, fade (amplitude), now }.
+function compositeInto(fbo, rowC, live, opt) {
+  run(P.composite, fbo, Nx, Ny, { fed: R.fed.t, fade: R.fade.t, F: [gl.TEXTURE_2D_ARRAY, R.F.t], G: [gl.TEXTURE_2D_ARRAY, R.G.t] }, u => {
     gl.uniform2i(u.N, Nx, Ny);
-    gl.uniform1i(u.goal, goal ? 1 : 0);
-    gl.uniform1i(u.baseShift, rowC - steps[0].row);
-    const slot = new Int32Array(IN_FLIGHT), shift = new Int32Array(IN_FLIGHT), age = new Float32Array(IN_FLIGHT);
-    live.forEach((s, i) => { slot[i] = s.slot; shift[i] = rowC - s.row; age[i] = now === undefined ? 1e6 : (now - s.t) / 1000; });
-    gl.uniform1fv(u.age, age);
+    gl.uniform1i(u.goal, opt.goal ? 1 : 0);
+    gl.uniform1i(u.fedShift, rowC - fedRow); gl.uniform1i(u.fadeShift, rowC - fadeRow);
+    gl.uniform1f(u.fedAmp, opt.fed); gl.uniform1f(u.fadeAmp, opt.fade);
+    const slot = new Int32Array(IN_FLIGHT), shift = new Int32Array(IN_FLIGHT);
+    const age = new Float32Array(IN_FLIGHT), amp = new Float32Array(IN_FLIGHT);
+    live.forEach((s, i) => {
+      slot[i] = s.slot; shift[i] = rowC - s.row;
+      age[i] = Math.min(1e6, (opt.now - s.t) / 1000);
+      amp[i] = s.ampNow !== undefined ? s.ampNow : ampOf(s, opt.now);
+    });
+    gl.uniform1fv(u.age, age); gl.uniform1fv(u.amp, amp);
     gl.uniform1f(u.arrive, T_ARRIVE); gl.uniform1f(u.done, phys.done);
     gl.uniform1i(u.count, live.length);
     gl.uniform1iv(u.slot, slot);
@@ -694,19 +729,20 @@ let lockRow = 0, lockTime = 0, lockBusy = 0;
 function composite(now) {
   const rows = scrollY * Ny / Ly, rowC = Math.floor(rows);
   fy = rows - rowC;
-  const live = steps.slice(1);
+  const live = steps;
   for (const s of live) fieldOf(s.slot, (now - s.t) / 1000, R.F.fbos[s.slot]);
-  compositeInto(R.comp.f, rowC, live, false, now);
+  const fa = fadeAmp(now);
+  compositeInto(R.comp.f, rowC, live, { fed: fedOn ? 1 : 0, fade: fa > 0.003 ? fa : 0, now });
   walls(R.comp.t, R.comp2.f);
   // Judge where the picture has formed, and lock toward full resolution there. Not while a
   // drive change is pending (the full-resolution page is only redrawn with it), nor while a
   // change is in its first half, before its waves have reached everywhere they will pass.
-  compositeInto(R.goal.f, rowC, live, true);
+  compositeInto(R.goal.f, rowC, live, { goal: true, fed: fedOn ? 1 : 0, fade: 0, now });
   walls(R.goal.t, R.goal2.f);
   run(P.ssim, R.score.f, Nx, Ny, { S: R.comp2.t, P: R.goal2.t }, u => {
     gl.uniform2i(u.N, Nx, Ny); gl.uniform3fv(u.bg, colors.bg);
   });
-  const young = live.some(s => now - s.t < 500 * T_ARRIVE);
+  const young = live.some(s => s.off > now && now - s.t < 500 * T_ARRIVE);
   const dt = lockTime ? Math.min(0.1, (now - lockTime) / 1000) : 0;
   run(P.lock, R.lock[1].f, Nx, Ny, { A: R.lock[0].t, Q: R.score.t }, u => {
     gl.uniform2i(u.N, Nx, Ny);
@@ -740,7 +776,7 @@ function draw() {
 }
 
 function hud(now) {
-  const live = steps.length - 1;
+  const live = steps.length;
   const since = live ? (now - steps[steps.length - 1].t) / 1000 : Infinity;
   const arrived = Math.min(1, since / phys.done);
   hudText.textContent =
@@ -769,11 +805,11 @@ function tick(now) {
     if (now - lastStep >= STEP_GAP) { moved = false; changeDrive(now); }
     else more = true;
   }
-  while (steps.length > 1 && (now - steps[1].t) / 1000 > phys.done) settleOldest();
+  while (steps.length && arrived(steps[0], now)) settleOldest(now);
   composite(now);
   draw();
   hud(now);
-  if (steps.length > 1 || now - lockBusy < 2 * LOCK_RISE * 1000) more = true;   // until the lock has eased in
+  if (steps.length || fadeAmp(now) > 0.003 || now - lockBusy < 2 * LOCK_RISE * 1000) more = true;   // until settled and eased in
   lastFrame = more ? now : 0;
   if (!more) lockTime = 0;
   if (more) loop();
