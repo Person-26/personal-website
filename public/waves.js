@@ -42,17 +42,19 @@
 // Text scrolled past the top or bottom simply leaves the window.
 // Every change in flight is transformed back each frame with its modes' current phases.
 //
-// The grid is coarser than the screen and band-limited, so the settled field is a little soft.
-// Where the picture has formed, it hands over to the same page drawn at full screen resolution.
-// "Formed" is judged on the images, not the field: the colours on the slice against the page
-// they are heading for, by local structural similarity (SSIM) per colour channel, the worst
-// channel counting. Locking in eases over LOCK_RISE; wherever the picture stops matching (new
-// waves arriving) it eases back to the simulation over LOCK_FALL.
+// Colour is amplitude: the field is the complex envelope of light at the carrier frequency, and
+// each pixel shows (R, G, B) = background +- (|E_x|, |E_y|, |E_z|). The phase is free, so for each
+// page the sheets' field is fitted to it (Gerchberg-Saxton, from a phase pattern fixed to the
+// page) within the band |q| < K: the knob is the carrier wavelength 2 pi / K. A field that fine can
+// only approximate the page; what is left over is what a light field really does when it is made
+// to draw: speckle in the strokes and dark vortices, points where the amplitude is zero and the
+// phase winds around them. A shorter wavelength makes the approximation as good as wanted.
 (() => {
 'use strict';
 
-const RHO = 0.8;           // band limit: fraction of the grid's Nyquist wavenumber kept
-const DENSITY = 0.55;      // grid points per CSS px wanted (rounded to a power of two)
+const WAVELENGTH = 8;      // CSS px: the carrier wavelength (?wavelength= overrides): the knob
+const RHO = 0.8;           // the amplitude's band (twice the field's) may use this much of the grid
+const GS_ITERS = 6;        // phase-fit iterations per drive change
 const EPS = 0.06;          // how close the finest in-slice mode sits to cutoff
 const T_ARRIVE = 4.0;      // s: from a drive change to the slice holding it
 const SIGMA = 0.25;        // spread of the tilt out of the slice (k_z / |q|)
@@ -61,9 +63,6 @@ const TAPER = 0.75;        // the band limit rolls off smoothly from this fracti
 const SHEET = 0.4;         // s: light time from the z current sheets to the slice
 const SLOTS = 3;           // changes arriving, held or leaving at once
 const STEP_GAP = 220;      // ms: at most one drive change per this interval while scrolling
-const LOCK_LO = 0.85, LOCK_HI = 0.97;   // SSIM over which an area goes from unlocked to locked
-const LOCK_RISE = 1.5;     // s: fade from the simulation to the full-resolution page
-const LOCK_FALL = 0.4;     // s: and back
 const MAX_POINTS = 1 << 19;
 let maxPoints = MAX_POINTS;
 
@@ -72,6 +71,8 @@ const canvas = document.getElementById('field');
 const doc = document.getElementById('content');
 const hudText = document.getElementById('hud-text');
 const modeButton = document.getElementById('mode');
+const knob = document.getElementById('knob');
+const knobInput = knob.querySelector('input'), knobOut = knob.querySelector('output');
 const reduce = matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
 
@@ -85,25 +86,62 @@ if (!gl || !gl.getExtension('EXT_color_buffer_float')) return;   // the plain HT
 const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\nout vec4 o;\n';
 const VS = '#version 300 es\nin vec2 p;\nvoid main(){ gl_Position = vec4(p, 0.0, 1.0); }';
 
-// Target page colour (minus background), or the new target minus the old one moved by the
-// scroll in between, zero-padded to twice the size each way (open on every side).
-// Packed as two complex numbers: (E_x + i E_y, E_z).
+// A fitted field (two complex numbers per texel), zero-padded to twice the size each way (open on
+// every side).
 const FS_EXT_RAW = HEAD + `
 uniform ivec2 N;
-uniform sampler2DArray T;
-uniform int la, lb, shift;     // T[la](n) - T[lb](n + shift rows); lb < 0 means just T[la]
-vec3 src(ivec2 n) {
-  vec3 a = texelFetch(T, ivec3(n, la), 0).rgb;
-  int y = n.y + shift;
-  if (lb >= 0 && y >= 0 && y < N.y) a -= texelFetch(T, ivec3(n.x, y, lb), 0).rgb;
-  return a;
-}
+uniform sampler2D U;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
-  if (p.x >= N.x) { o = vec4(0.0); return; }
-  if (p.y >= N.y) { o = vec4(0.0); return; }
-  vec3 v = src(p);
-  o = vec4(v.r, v.g, v.b, 0.0);
+  o = p.x < N.x && p.y < N.y ? texelFetch(U, p, 0) : vec4(0.0);
+}`;
+
+// Fitting the sheets' field to the page's amplitude, on the screen grid (periodic). Start: the
+// page's amplitude with a phase pattern fixed to the page (it moves with the text), per component.
+// Part 0 holds (E_x, E_y), part 1 holds E_z, each complex.
+const FS_GS_INIT = HEAD + `
+uniform sampler2DArray T;
+uniform int part, row;
+float hash(int x, int y, int c) {
+  uint h = uint(x) * 1664525u ^ uint(y) * 22695477u ^ uint(c) * 2654435761u;
+  h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
+  return float(h) / 4294967296.0;
+}
+vec2 cis(float a) { return vec2(cos(a), sin(a)); }
+void main() {
+  ivec2 n = ivec2(gl_FragCoord.xy);
+  vec3 t = texelFetch(T, ivec3(n, 0), 0).rgb;
+  int y = n.y + row;
+  const float TAU = 6.28318531;
+  o = part == 0 ? vec4(t.r * cis(TAU * hash(n.x, y, 0)), t.g * cis(TAU * hash(n.x, y, 1)))
+                : vec4(t.b * cis(TAU * hash(n.x, y, 2)), 0.0, 0.0);
+}`;
+// Keep only what the sheets can send (|q| below the band limit), conjugated and scaled for the
+// inverse transform.
+const FS_GS_BAND = HEAD + `
+uniform sampler2D X;
+uniform ivec2 N;
+uniform vec2 ks;               // (2 pi / Lx, 2 pi / Ly)
+uniform float kc;
+void main() {
+  ivec2 n = ivec2(gl_FragCoord.xy);
+  vec2 k = vec2(n.x < N.x / 2 ? n.x : n.x - N.x, n.y < N.y / 2 ? n.y : n.y - N.y) * ks;
+  float t = clamp((length(k) / kc - ${TAPER}) / (1.0 - ${TAPER}), 0.0, 1.0);
+  vec4 x = texelFetch(X, n, 0) * (0.5 + 0.5 * cos(3.14159265 * t)) / float(N.x * N.y);
+  o = vec4(x.x, -x.y, x.z, -x.w);
+}`;
+// Keep that field's phase, put the page's amplitude back.
+const FS_GS_PHASE = HEAD + `
+uniform sampler2D Y;
+uniform sampler2DArray T;
+uniform int part;
+vec2 unit(vec2 z) { float m = length(z); return m > 1e-20 ? z / m : vec2(1.0, 0.0); }
+void main() {
+  ivec2 n = ivec2(gl_FragCoord.xy);
+  vec4 y = texelFetch(Y, n, 0);
+  vec2 a = vec2(y.x, -y.y), b = vec2(y.z, -y.w);
+  vec3 t = texelFetch(T, ivec3(n, 0), 0).rgb;
+  o = part == 0 ? vec4(t.r * unit(a), t.g * unit(b)) : vec4(t.b * unit(a), 0.0, 0.0);
 }`;
 
 // Signed wavevector of spectrum index n.
@@ -134,17 +172,19 @@ void main() {
 // them, so they focus more sharply in time).
 const FS_EVOLVE = HEAD + KVEC + `
 uniform sampler2DArray Z;
-uniform int la;
+uniform int la, part;          // the change's slot; 0: (E_x, E_y), 1: E_z
 uniform float c, K, age, T, sheet, sig, dmax;
 uniform float off;             // s after the start when its drive let go of it (>= 1e8: never)
 vec2 conj(vec2 z) { return vec2(z.x, -z.y); }
-vec2 times_i(vec2 z) { return vec2(-z.y, z.x); }
-// Real part of the tilt averages <e^{i phase}> and <s^2 e^{i phase}> / sig^2, phase relative to
-// the frame turning at c K, tau before the focus (negative after).
-vec2 tilt(float m, float tau) {
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+vec2 cis(float a) { return vec2(cos(a), sin(a)); }
+// The tilt averages <e^{i phase}> and <s^2 e^{i phase}> / sig^2 of the envelope, phase relative
+// to the frame turning at c K, tau before the focus (negative after).
+void tilt(float m, float tau, out vec2 t0, out vec2 t2) {
   float u = c * m * tau * sig * sig, a = atan(u), r = 1.0 + u * u;
   float p = c * (m - K) * tau;
-  return vec2(pow(r, -0.25) * cos(p + 0.5 * a), pow(r, -0.75) * cos(p + 1.5 * a));
+  t0 = pow(r, -0.25) * cis(p + 0.5 * a);
+  t2 = pow(r, -0.75) * cis(p + 1.5 * a);
 }
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
@@ -174,16 +214,21 @@ void main() {
   float te = min(3.14159265 / kscale.x / max(v.x, 1e-6), 3.14159265 / kscale.y / max(v.y, 1e-6));
   if (tau < 0.0) te = min(te, dmax);
   env *= 1.0 - smoothstep(te - 1.0, te, abs(tau));
-  vec2 f = tilt(m, tau) * env;
-  float s2 = sig * sig;
-  float fz = (f.x - s2 * f.y) / (1.0 - s2);
+  vec2 f0, f2;
+  tilt(m, tau, f0, f2);
+  f0 *= env; f2 *= env;
+  vec4 z = texelFetch(Z, ivec3(n, 2 * la + part), 0);
+  float M = sqrt(float(4 * N.x * N.y));
+  if (part == 1) {
+    float s2 = sig * sig;
+    o = vec4(conj(cmul((f0 - s2 * f2) / (1.0 - s2), z.xy)), 0.0, 0.0) / M;
+    return;
+  }
   vec2 q = m > 0.0 ? k / m : vec2(0.0);
-  vec4 z = texelFetch(Z, ivec3(n, la), 0);
-  vec2 zm = conj(texelFetch(Z, ivec3((2 * N - n) % (2 * N), la), 0).xy);   // conj Z1(-k)
-  vec2 tx = 0.5 * (z.xy + zm), ty = -times_i(0.5 * (z.xy - zm));        // E_x, E_y separated
+  vec2 tx = z.xy, ty = z.zw;
   vec2 l = q.x * tx + q.y * ty;                                          // along q
-  vec2 sx = f.x * tx + (f.y - f.x) * q.x * l, sy = f.x * ty + (f.y - f.x) * q.y * l;
-  o = vec4(conj(sx + times_i(sy)), conj(fz * z.zw)) / sqrt(float(4 * N.x * N.y));
+  vec2 sx = cmul(f0, tx) + q.x * cmul(f2 - f0, l), sy = cmul(f0, ty) + q.y * cmul(f2 - f0, l);
+  o = vec4(conj(sx), conj(sy)) / M;
 }`;
 
 // One radix-2 Stockham pass on two complex numbers per texel.
@@ -204,31 +249,30 @@ void main() {
   o = e + vec4(cmul(w, q.xy), cmul(w, q.zw));
 }`;
 
-// Inverse FFT -> field (E_x, E_y, E_z) on the screen.
+// Inverse FFT -> the complex field on the screen (one part).
 const FS_UNPACK = HEAD + `
 uniform sampler2D F;
 void main() {
   vec4 g = texelFetch(F, ivec2(gl_FragCoord.xy), 0);
-  o = vec4(g.x, -g.y, g.z, 0.0);
+  o = vec4(g.x, -g.y, g.z, -g.w);
 }`;
 
-// The slice now: the settled field plus every drive change still travelling, each read where
-// the page has moved it since it was made.
+// The slice now: every drive change still on it, each read where the page has moved it since it
+// was made, added as complex fields (they interfere), then shown as amplitude.
 const FS_COMPOSITE = HEAD + `
-uniform sampler2DArray F, G;   // each change now, and once arrived
+uniform sampler2DArray F, G;   // each change now, and once arrived (layers 2 slot, 2 slot + 1)
 uniform ivec2 N;
-uniform int goal;              // 1: what it will settle to instead of now
+uniform vec3 sgn;              // ink lighter (+1) or darker (-1) than the background
 uniform int count;
 uniform int slot[${SLOTS}];
 uniform int shift[${SLOTS}];   // rows the page has moved since each was made
 uniform float held[${SLOTS}];  // 1: arrived and held, its field is G
-uniform float cur[${SLOTS}];   // 1: the change being driven now
 uniform float gpart[${SLOTS}]; // how much of its arrived field to use where its waves are cut off
 uniform float coming[${SLOTS}];// 1: still on its way in, from the margin currents
 uniform vec2 margin;          // grid x where the text column starts and ends
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  vec3 e = vec3(0.0);
+  vec4 a = vec4(0.0); vec2 b = vec2(0.0);
   // The margin currents send their waves inward only: none outside them, building up across them.
   float x = float(n.x) + 0.5;
   float inside = smoothstep(0.0, margin.x, x) * (1.0 - smoothstep(margin.y, float(N.x), x));
@@ -236,65 +280,29 @@ void main() {
     if (j >= count) break;
     int y = n.y + shift[j];
     if (y < 0 || y >= N.y) continue;
-    ivec3 q = ivec3(n.x, y, slot[j]);
-    vec3 g = texelFetch(G, q, 0).rgb;
-    if (goal == 1) { e += cur[j] * g; continue; }
-    if (held[j] > 0.5) { e += g; continue; }
+    ivec3 q0 = ivec3(n.x, y, 2 * slot[j]), q1 = q0 + ivec3(0, 0, 1);
+    vec4 ga = texelFetch(G, q0, 0); vec2 gb = texelFetch(G, q1, 0).xy;
+    if (held[j] > 0.5) { a += ga; b += gb; continue; }
     // Waves were made in this change's own frame; where the page has moved that frame's edge
     // onto the screen, let them fade out instead of stopping at a line.
     float edge = shift[j] > 0 ? float(N.y - 1 - y) : shift[j] < 0 ? float(y) : 1e9;
     float t = smoothstep(0.0, 40.0, edge);
-    e += mix(1.0, inside, coming[j]) * (t * texelFetch(F, q, 0).rgb + (1.0 - t) * gpart[j] * g);
+    float w = mix(1.0, inside, coming[j]);
+    a += w * (t * texelFetch(F, q0, 0) + (1.0 - t) * gpart[j] * ga);
+    b += w * (t * texelFetch(F, q1, 0).xy + (1.0 - t) * gpart[j] * gb);
   }
-  o = vec4(e, 0.0);
-}`;
-
-// Has the picture formed here? Local SSIM between the colours on the slice and the colours
-// it is heading for, over a 13 x 13 cell window, per channel; the worst channel counts.
-const FS_SSIM = HEAD + `
-uniform sampler2D S, P;        // field now; settled field
-uniform ivec2 N;
-uniform vec3 bg;
-void main() {
-  ivec2 n = ivec2(gl_FragCoord.xy);
-  vec3 mx = vec3(0.0), my = vec3(0.0), xx = vec3(0.0), yy = vec3(0.0), xy = vec3(0.0);
-  for (int j = -3; j <= 3; j++) for (int i = -3; i <= 3; i++) {
-    ivec2 q = clamp(n + 2 * ivec2(i, j), ivec2(0), N - 1);
-    vec3 x = clamp(bg + texelFetch(S, q, 0).rgb, 0.0, 1.0);
-    vec3 y = clamp(bg + texelFetch(P, q, 0).rgb, 0.0, 1.0);
-    mx += x; my += y; xx += x * x; yy += y * y; xy += x * y;
-  }
-  mx /= 49.0; my /= 49.0;
-  vec3 vx = max(xx / 49.0 - mx * mx, 0.0), vy = max(yy / 49.0 - my * my, 0.0), cxy = xy / 49.0 - mx * my;
-  const float C1 = 0.0001, C2 = 0.0009;
-  vec3 ssim = (2.0 * mx * my + C1) * (2.0 * cxy + C2) / ((mx * mx + my * my + C1) * (vx + vy + C2));
-  o = vec4(min(ssim.r, min(ssim.g, ssim.b)), 0.0, 0.0, 0.0);
-}`;
-
-// How locked each grid point is to the full-resolution page: moved with the scroll, then
-// eased toward how well the picture has formed there.
-const FS_LOCK = HEAD + `
-uniform sampler2D A, Q;        // previous lock; SSIM this frame
-uniform ivec2 N;
-uniform int shift;             // rows moved since the previous lock
-uniform float rise, fall;      // largest change this frame
-void main() {
-  ivec2 n = ivec2(gl_FragCoord.xy);
-  int y = n.y + shift;
-  float a = y >= 0 && y < N.y ? texelFetch(A, ivec2(n.x, y), 0).r : 0.0;
-  float want = smoothstep(${LOCK_LO}, ${LOCK_HI}, texelFetch(Q, n, 0).r);
-  o = vec4(a + clamp(want - a, -fall, rise), 0.0, 0.0, 0.0);
+  o = vec4(sgn * vec3(length(a.xy), length(a.zw), length(b)), 0.0);
 }`;
 
 // The screen. The field between grid points is what the band-limited mode sum gives there, so
-// it is reconstructed with a Lanczos-3 (windowed sinc) kernel rather than bilinearly.
+// it is reconstructed with a Lanczos-3 (windowed sinc) kernel rather than bilinearly (the
+// amplitude's band is twice the field's, and the grid is sized for it).
 const FS_DISPLAY = HEAD + `
-uniform sampler2D F, A, H;     // field, lock, full-resolution page
+uniform sampler2D F;           // background-relative colour on the grid
 uniform ivec2 N;
 uniform vec2 res;
 uniform vec3 bg;
 uniform float fy;              // fraction of a grid row the page is past the composite
-uniform float hshift;          // device px the page has moved since H was drawn
 vec3 E(int x, int y) {
   return texelFetch(F, clamp(ivec2(x, y), ivec2(0), N - 1), 0).rgb;
 }
@@ -305,7 +313,6 @@ float lz(float x) {
   float p = 3.14159265 * x;
   return 3.0 * sin(p) * sin(p / 3.0) / (p * p);
 }
-float L(ivec2 i) { return texelFetch(A, clamp(i, ivec2(0), N - 1), 0).r; }
 void main() {
   vec2 g = vec2(gl_FragCoord.x / res.x * float(N.x), (1.0 - gl_FragCoord.y / res.y) * float(N.y) + fy);
   ivec2 i = ivec2(floor(g)); vec2 f = fract(g);
@@ -321,12 +328,7 @@ void main() {
     e += wy[b] * r;
   }
   e /= sx * sy;
-  vec3 sim = clamp(bg + e, 0.0, 1.0);
-  float lock = mix(mix(L(i), L(i + ivec2(1, 0)), f.x), mix(L(i + ivec2(0, 1)), L(i + ivec2(1, 1)), f.x), f.y);
-  vec2 q = vec2(gl_FragCoord.x, res.y - gl_FragCoord.y + hshift);
-  lock = q.y >= 0.0 && q.y < res.y ? clamp(lock, 0.0, 1.0) : 0.0;
-  vec3 hi = texture(H, q / res).rgb;
-  o = vec4(mix(sim, hi, lock * lock * (3.0 - 2.0 * lock)), 1.0);
+  o = vec4(clamp(bg + e, 0.0, 1.0), 1.0);
 }`;
 
 function compile(type, src) {
@@ -357,7 +359,8 @@ try {
   };
   P = {
     extRaw: program(FS_EXT_RAW), spec: program(FS_SPEC), evolve: program(FS_EVOLVE), fft: program(FS_FFT),
-    unpack: program(FS_UNPACK), composite: program(FS_COMPOSITE), ssim: program(FS_SSIM), lock: program(FS_LOCK), disp: program(FS_DISPLAY),
+    gsInit: program(FS_GS_INIT), gsBand: program(FS_GS_BAND), gsPhase: program(FS_GS_PHASE),
+    unpack: program(FS_UNPACK), composite: program(FS_COMPOSITE), disp: program(FS_DISPLAY),
   };
 } catch (e) {
   console.warn('waves: falling back to the plain page', e);
@@ -432,13 +435,15 @@ function run(prog, fbo, w, h, tex, set) {
 
 // ---------------------------------------------------------------- state
 let Lx = 0, Ly = 0, Nx = 0, Ny = 0;
+let wavelength = WAVELENGTH;
 let margins = [0, 0];   // CSS px: where the text column starts and ends (the drive currents fill the rest)
 const phys = { kc: 0, K: 0, c: 0, done: 0 };
 let R = null;
 // Every change the drives have made that is still on the slice, oldest first: its page was
 // captured with the page scrolled to grid row `row`, it started at t, and `off` is when a
 // newer change let go of it (Infinity: it is the one being driven). Its spectrum is in R.Z,
-// its field this frame in R.F and once arrived in R.G, all at layer `slot`.
+// its field this frame in R.F and once arrived in R.G, all at layers 2 slot (E_x, E_y) and
+// 2 slot + 1 (E_z).
 let steps = [];        // { row, t: ms, slot, off: ms }
 let raf = 0, moved = false, lastStep = -1e9, colors = null;
 
@@ -446,9 +451,8 @@ function pow2AtLeast(n) { return 1 << Math.ceil(Math.log2(Math.max(2, n))); }
 
 function freeResources() {
   if (!R) return;
-  for (const r of [R.ext[0], R.ext[1], R.comp, R.goal, R.score, R.lock[0], R.lock[1]]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
+  for (const r of [...R.ext, ...R.gs[0], ...R.gs[1], R.comp]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
   for (const s of [R.T, R.Z, R.F, R.G]) { gl.deleteTexture(s.t); s.fbos.forEach(f => gl.deleteFramebuffer(f)); }
-  gl.deleteTexture(R.hi);
   R = null;
 }
 
@@ -457,21 +461,22 @@ function allocate() {
   if (2 * Math.max(Nx, Ny) > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('grid too large');
   R = {
     ext: [target(2 * Nx, 2 * Ny), target(2 * Nx, 2 * Ny)],
-    T: layers(Nx, Ny, 1),                        // the target page (colour minus background)
-    Z: layers(2 * Nx, 2 * Ny, SLOTS),            // spectrum of each change, / sqrt(M)
-    F: layers(Nx, Ny, SLOTS),                    // each change on the slice, this frame
-    G: layers(Nx, Ny, SLOTS),                    // ... and once arrived
+    gs: [0, 1].map(() => [target(Nx, Ny), target(Nx, Ny)]),   // phase fit, per part
+    T: layers(Nx, Ny, 1),                        // the target page (|colour - background|)
+    Z: layers(2 * Nx, 2 * Ny, 2 * SLOTS),        // spectrum of each change, / sqrt(M)
+    F: layers(Nx, Ny, 2 * SLOTS),                // each change on the slice, this frame
+    G: layers(Nx, Ny, 2 * SLOTS),                // ... and once arrived
     comp: target(Nx, Ny, true),                  // the slice now, moved
-    goal: target(Nx, Ny, true),                  // the settled picture, moved
-    score: target(Nx, Ny, true),                 // how well the picture has formed (SSIM)
-    lock: [target(Nx, Ny, true), target(Nx, Ny, true)],   // handover to full resolution
-    hi: hiTexture(),                             // the page at full resolution
   };
   steps = [];                                    // drives off
 }
 
+// The field's band limit for a carrier wavelength (K a little above it, so that every mode the
+// sheets hold crosses the slice at a real angle).
+const bandFor = lam => 2 * Math.PI / lam / Math.sqrt(1 + EPS);
 function setPhysics() {
-  const kc = RHO * Math.PI * Math.min(Nx / Lx, Ny / Ly);
+  // The amplitude has twice the field's band; the grid is sized for it, or caps it if too coarse.
+  const kc = Math.min(bandFor(wavelength), 0.5 * RHO * Math.PI * Math.min(Nx / Lx, Ny / Ly));
   const K = Math.sqrt(1 + EPS) * kc;
   const c = 0.95 * Lx / T_ARRIVE;                  // the fastest waves cross the width in T
   Object.assign(phys, { kc, K, c, done: T_ARRIVE + 0.05 });
@@ -528,52 +533,27 @@ function rasterize(row) {
   const img = ctx.getImageData(0, 0, Nx, Ny).data;
   if (!rasterBuf || rasterBuf.length !== Nx * Ny * 4) rasterBuf = new Float32Array(Nx * Ny * 4);
   const [br, bgc, bb] = colors.bg;
-  for (let i = 0, n = Nx * Ny; i < n; i++) {        // the field is colour minus background
-    rasterBuf[i * 4] = img[i * 4] / 255 - br;
-    rasterBuf[i * 4 + 1] = img[i * 4 + 1] / 255 - bgc;
-    rasterBuf[i * 4 + 2] = img[i * 4 + 2] / 255 - bb;
+  for (let i = 0, n = Nx * Ny; i < n; i++) {        // the amplitude is |colour - background|
+    rasterBuf[i * 4] = Math.abs(img[i * 4] / 255 - br);
+    rasterBuf[i * 4 + 1] = Math.abs(img[i * 4 + 1] / 255 - bgc);
+    rasterBuf[i * 4 + 2] = Math.abs(img[i * 4 + 2] / 255 - bb);
   }
   return rasterBuf;
 }
 
-// The same page at full screen resolution, for areas that have settled.
-const hc = document.createElement('canvas');
-const hctx = hc.getContext('2d');
-let hiScroll = 0;
-function hiTexture() {
-  const t = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, t);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-  return t;
-}
-function captureHi() {
-  hc.width = canvas.width; hc.height = canvas.height;
-  hctx.setTransform(1, 0, 0, 1, 0, 0);
-  hctx.fillStyle = colors.bgCss;
-  hctx.fillRect(0, 0, hc.width, hc.height);
-  hctx.setTransform(hc.width / Lx, 0, 0, hc.height / Ly, 0, 0);
-  paintText(hctx, Ly);
-  gl.bindTexture(gl.TEXTURE_2D, R.hi);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, hc);
-  hiScroll = scrollY;
-}
-
-function fft2() {
-  let a = 0;
-  for (const [horiz, size] of [[1, 2 * Nx], [0, 2 * Ny]]) {
+// Forward FFT in place over the ping-pong pair (w x h), starting from pair[a]; the index of the result.
+function fft(pair, w, h, a) {
+  for (const [horiz, size] of [[1, w], [0, h]]) {
     for (let sub = 2; sub <= size; sub *= 2) {
-      run(P.fft, R.ext[1 - a].f, 2 * Nx, 2 * Ny, { src: R.ext[a].t }, u => {
+      run(P.fft, pair[1 - a].f, w, h, { src: pair[a].t }, u => {
         gl.uniform1i(u.size, size); gl.uniform1i(u.sub, sub); gl.uniform1i(u.horiz, horiz);
       });
       a = 1 - a;
     }
   }
-  return R.ext[a].t;
+  return a;
 }
+function fft2() { return R.ext[fft(R.ext, 2 * Nx, 2 * Ny, 0)].t; }
 
 function rowNow() { return Math.round(scrollY * Ny / Ly); }
 
@@ -584,33 +564,50 @@ function capture(tl, row) {
   gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, tl, Nx, Ny, 1, gl.RGBA, gl.FLOAT, data);
 }
 
-// Band-limited spectrum (into layer `layer` of R.Z) of the captured page (R.T layer 0).
-function coefFor(s, p, layer) {
-  run(P.extRaw, R.ext[0].f, 2 * Nx, 2 * Ny, { T: [gl.TEXTURE_2D_ARRAY, R.T.t] }, u => {
-    gl.uniform2i(u.N, Nx, Ny);
-    gl.uniform1i(u.la, 0); gl.uniform1i(u.lb, -1);    // the captured page, whole
-    gl.uniform1i(u.shift, 0);
-  });
-  const G = fft2();
-  run(P.spec, R.Z.fbos[layer], 2 * Nx, 2 * Ny, { G }, u => {
-    gl.uniform2i(u.N, Nx, Ny);
-    gl.uniform2f(u.kscale, Math.PI / Lx, Math.PI / Ly);
-    gl.uniform1f(u.kc, phys.kc);
-  });
+// The sheets' field for the captured page (R.T layer 0, captured at grid row `row`): its phase
+// fitted so that its amplitude comes as close to the page as the band allows, then its
+// band-limited spectrum into R.Z at the slot's two layers.
+function coefFor(slot, row) {
+  const T = [gl.TEXTURE_2D_ARRAY, R.T.t];
+  for (const part of [0, 1]) {
+    const pair = R.gs[part];
+    run(P.gsInit, pair[0].f, Nx, Ny, { T }, u => { gl.uniform1i(u.part, part); gl.uniform1i(u.row, row); });
+    let a = 0;
+    for (let it = 0; it < GS_ITERS; it++) {
+      a = fft(pair, Nx, Ny, a);
+      run(P.gsBand, pair[1 - a].f, Nx, Ny, { X: pair[a].t }, u => {
+        gl.uniform2i(u.N, Nx, Ny);
+        gl.uniform2f(u.ks, 2 * Math.PI / Lx, 2 * Math.PI / Ly);
+        gl.uniform1f(u.kc, phys.kc);
+      });
+      a = fft(pair, Nx, Ny, 1 - a);
+      run(P.gsPhase, pair[1 - a].f, Nx, Ny, { Y: pair[a].t, T }, u => gl.uniform1i(u.part, part));
+      a = 1 - a;
+    }
+    run(P.extRaw, R.ext[0].f, 2 * Nx, 2 * Ny, { U: pair[a].t }, u => gl.uniform2i(u.N, Nx, Ny));
+    const G = fft2();
+    run(P.spec, R.Z.fbos[2 * slot + part], 2 * Nx, 2 * Ny, { G }, u => {
+      gl.uniform2i(u.N, Nx, Ny);
+      gl.uniform2f(u.kscale, Math.PI / Lx, Math.PI / Ly);
+      gl.uniform1f(u.kc, phys.kc);
+    });
+  }
 }
 
-// The change with spectrum in layer `layer`, `age` seconds after it started, into fbo.
-function fieldOf(layer, age, fbo, off = 1e9) {
-  run(P.evolve, R.ext[0].f, 2 * Nx, 2 * Ny, { Z: [gl.TEXTURE_2D_ARRAY, R.Z.t] }, u => {
-    gl.uniform2i(u.N, Nx, Ny);
-    gl.uniform1i(u.la, layer);
-    gl.uniform2f(u.kscale, Math.PI / Lx, Math.PI / Ly);
-    gl.uniform1f(u.c, phys.c); gl.uniform1f(u.K, phys.K); gl.uniform1f(u.age, age);
-    gl.uniform1f(u.T, T_ARRIVE); gl.uniform1f(u.sheet, SHEET);
-    gl.uniform1f(u.sig, SIGMA); gl.uniform1f(u.dmax, D_MAX); gl.uniform1f(u.off, off);
-  });
-  const F = fft2();
-  run(P.unpack, fbo, Nx, Ny, { F });
+// The change in `slot`, `age` seconds after it started, into the slot's layers of `dst` (R.F or R.G).
+function fieldOf(slot, age, dst, off = 1e9) {
+  for (const part of [0, 1]) {
+    run(P.evolve, R.ext[0].f, 2 * Nx, 2 * Ny, { Z: [gl.TEXTURE_2D_ARRAY, R.Z.t] }, u => {
+      gl.uniform2i(u.N, Nx, Ny);
+      gl.uniform1i(u.la, slot); gl.uniform1i(u.part, part);
+      gl.uniform2f(u.kscale, Math.PI / Lx, Math.PI / Ly);
+      gl.uniform1f(u.c, phys.c); gl.uniform1f(u.K, phys.K); gl.uniform1f(u.age, age);
+      gl.uniform1f(u.T, T_ARRIVE); gl.uniform1f(u.sheet, SHEET);
+      gl.uniform1f(u.sig, SIGMA); gl.uniform1f(u.dmax, D_MAX); gl.uniform1f(u.off, off);
+    });
+    const F = fft2();
+    run(P.unpack, dst.fbos[2 * slot + part], Nx, Ny, { F });
+  }
 }
 
 const ageOf = (s, now) => (now - s.t) / 1000;
@@ -628,11 +625,9 @@ function changeDrive(now, settled) {
   if (settled || reduce.matches) {          // jump straight to the standing wave
     const s = { row, t: now - 1e5, slot: 0, off: Infinity };
     capture(0, row);
-    coefFor(s, null, 0);
-    fieldOf(0, 1e6, R.G.fbos[0]);
+    coefFor(0, row);
+    fieldOf(0, 1e6, R.G);
     steps = [s];
-    for (const l of R.lock) { gl.bindFramebuffer(gl.FRAMEBUFFER, l.f); gl.clearColor(1, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
-    lockRow = Math.floor(scrollY * Ny / Ly);
   } else {
     const last = steps[steps.length - 1];
     const used = new Set(steps.map(s => s.slot));
@@ -644,70 +639,51 @@ function changeDrive(now, settled) {
       // takes the latest page and keeps its start time.
       last.row = row;
       capture(0, row);
-      coefFor(last, null, last.slot);
-      fieldOf(last.slot, 1e6, R.G.fbos[last.slot]);
+      coefFor(last.slot, row);
+      fieldOf(last.slot, 1e6, R.G);
     } else if (slot >= SLOTS) {
       return false;
     } else {
       for (const o of steps) if (isCur(o, now)) o.off = now;   // let go of what it held
       const s = { row, t: now, slot, off: Infinity };
       capture(0, row);
-      coefFor(s, null, slot);               // the whole page, sent in from the sides
-      fieldOf(slot, 1e6, R.G.fbos[slot]);
+      coefFor(slot, row);                   // the whole page, sent in by the currents
+      fieldOf(slot, 1e6, R.G);
       steps.push(s);
     }
   }
-  captureHi();
   lastStep = now;
   return true;
 }
 
 // The slice with the page at grid row rowC (fields of changes not held already in R.F).
-function compositeInto(fbo, rowC, now, goal) {
+function compositeInto(fbo, rowC, now) {
   run(P.composite, fbo, Nx, Ny, { F: [gl.TEXTURE_2D_ARRAY, R.F.t], G: [gl.TEXTURE_2D_ARRAY, R.G.t] }, u => {
     gl.uniform2i(u.N, Nx, Ny);
-    gl.uniform1i(u.goal, goal ? 1 : 0);
+    gl.uniform3fv(u.sgn, colors.sgn);
     const slot = new Int32Array(SLOTS), shift = new Int32Array(SLOTS);
-    const held = new Float32Array(SLOTS), cur = new Float32Array(SLOTS), gpart = new Float32Array(SLOTS), coming = new Float32Array(SLOTS);
+    const held = new Float32Array(SLOTS), gpart = new Float32Array(SLOTS), coming = new Float32Array(SLOTS);
     steps.forEach((s, i) => {
       slot[i] = s.slot; shift[i] = rowC - s.row;
-      held[i] = isHeld(s, now) ? 1 : 0; cur[i] = isCur(s, now) ? 1 : 0;
+      held[i] = isHeld(s, now) ? 1 : 0;
       const a = ageOf(s, now), x = Math.min(1, Math.max(0, (a - 0.75 * T_ARRIVE) / (phys.done - 0.75 * T_ARRIVE)));
-      gpart[i] = cur[i] * x * x * (3 - 2 * x);
+      gpart[i] = isCur(s, now) ? x * x * (3 - 2 * x) : 0;
       coming[i] = a < T_ARRIVE ? 1 : 0;
     });
     gl.uniform1i(u.count, steps.length);
     gl.uniform1iv(u.slot, slot); gl.uniform1iv(u.shift, shift);
-    gl.uniform1fv(u.held, held); gl.uniform1fv(u.cur, cur); gl.uniform1fv(u.gpart, gpart); gl.uniform1fv(u.coming, coming);
+    gl.uniform1fv(u.held, held); gl.uniform1fv(u.gpart, gpart); gl.uniform1fv(u.coming, coming);
     gl.uniform2f(u.margin, margins[0] * Nx / Lx, margins[1] * Nx / Lx);
   });
 }
 
 let fy = 0;            // fraction of a row the page is past the composite
-let lockRow = 0, lockTime = 0, lockBusy = 0;
 function composite(now) {
   const rows = scrollY * Ny / Ly, rowC = Math.floor(rows);
   fy = rows - rowC;
   steps = steps.filter(s => !isGone(s, now));
-  for (const s of steps) if (!isHeld(s, now)) fieldOf(s.slot, ageOf(s, now), R.F.fbos[s.slot], offOf(s));
-  compositeInto(R.comp.f, rowC, now, false);
-  // Judge where the picture has formed, and lock toward full resolution there. Not while a
-  // drive change is pending (the full-resolution page is only redrawn with it), nor while a
-  // change is in its first half, before its waves have reached everywhere they will pass.
-  compositeInto(R.goal.f, rowC, now, true);
-  run(P.ssim, R.score.f, Nx, Ny, { S: R.comp.t, P: R.goal.t }, u => {
-    gl.uniform2i(u.N, Nx, Ny); gl.uniform3fv(u.bg, colors.bg);
-  });
-  const young = steps.some(s => isCur(s, now) && ageOf(s, now) < 0.5 * T_ARRIVE);
-  const dt = lockTime ? Math.min(0.1, (now - lockTime) / 1000) : 0;
-  run(P.lock, R.lock[1].f, Nx, Ny, { A: R.lock[0].t, Q: R.score.t }, u => {
-    gl.uniform2i(u.N, Nx, Ny);
-    gl.uniform1i(u.shift, rowC - lockRow);
-    gl.uniform1f(u.rise, moved || young ? 0 : dt / LOCK_RISE); gl.uniform1f(u.fall, dt / LOCK_FALL);
-  });
-  R.lock.reverse();
-  lockRow = rowC; lockTime = now;
-  if (steps.some(s => !isHeld(s, now)) || moved) lockBusy = now;
+  for (const s of steps) if (!isHeld(s, now)) fieldOf(s.slot, ageOf(s, now), R.F, offOf(s));
+  compositeInto(R.comp.f, rowC, now);
 }
 
 function hex(v) {
@@ -719,15 +695,16 @@ function readColors() {
   const cs = getComputedStyle(root);
   const v = name => cs.getPropertyValue(name).trim();
   colors = { bg: hex(v('--bg')), bgCss: v('--bg'), fgCss: v('--fg'), mutedCss: v('--muted'), negCss: v('--neg') };
+  const fg = hex(v('--fg'));
+  colors.sgn = colors.bg.map((b, i) => fg[i] >= b ? 1 : -1);   // ink lighter or darker than the background
 }
 
 function draw() {
-  run(P.disp, null, canvas.width, canvas.height, { F: R.comp.t, A: R.lock[0].t, H: R.hi }, u => {
+  run(P.disp, null, canvas.width, canvas.height, { F: R.comp.t }, u => {
     gl.uniform2i(u.N, Nx, Ny);
     gl.uniform2f(u.res, canvas.width, canvas.height);
     gl.uniform3fv(u.bg, colors.bg);
     gl.uniform1f(u.fy, fy);
-    gl.uniform1f(u.hshift, (scrollY - hiScroll) * canvas.height / Ly);
   });
 }
 
@@ -736,7 +713,7 @@ function hud(now) {
   const since = last ? ageOf(last, now) : Infinity;
   const arrived = Math.min(1, since / phys.done);
   hudText.textContent =
-    `(R, G, B) − background = (Eₓ, E_y, E_z)(x, y, z₀, w₀) · driven from the left and right edges · ` +
+    `(R, G, B) = background ± (|Eₓ|, |E_y|, |E_z|) on the slice z = 0 · wavelength ${Math.round(2 * Math.PI / phys.K)} px · ` +
     `${arrived >= 1 ? 'standing' : `${Math.round(100 * arrived)}% arrived`}`;
 }
 
@@ -764,9 +741,8 @@ function tick(now) {
   composite(now);
   draw();
   hud(now);
-  if (steps.some(s => !isHeld(s, now)) || now - lockBusy < 2 * LOCK_RISE * 1000) more = true;   // until settled and eased in
+  if (steps.some(s => !isHeld(s, now))) more = true;   // until settled
   lastFrame = more ? now : 0;
-  if (!more) lockTime = 0;
   if (more) loop();
 }
 
@@ -812,7 +788,8 @@ function layout() {
   canvas.height = Math.round(Ly * dpr);
   const cap = Math.min(2048, pow2AtLeast(+params.get('grid') || 2048));   // ?grid=512 caps resolution
   const pow2Near = v => 1 << Math.max(1, Math.round(Math.log2(v)));
-  let nx = Math.min(cap, pow2Near(DENSITY * Lx)), ny = Math.min(cap, pow2Near(DENSITY * Ly));
+  const density = 2 * bandFor(wavelength) / (RHO * Math.PI);      // grid points per CSS px
+  let nx = Math.min(cap, pow2Near(density * Lx)), ny = Math.min(cap, pow2Near(density * Ly));
   while (nx * ny > maxPoints) { if (nx / Lx > ny / Ly) nx /= 2; else ny /= 2; }
   Nx = nx; Ny = ny;
   const box = doc.getBoundingClientRect(), cs = getComputedStyle(doc);
@@ -827,6 +804,7 @@ function layout() {
 function setWaves(on, settled) {
   modeButton.setAttribute('aria-pressed', String(on));
   modeButton.textContent = on ? 'Waves: on' : 'Waves: off';
+  knob.hidden = !on;
   try { localStorage.setItem('waves', on ? 'on' : 'off'); } catch (e) { /* not stored */ }
   if (!on) {
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
@@ -842,10 +820,29 @@ function setWaves(on, settled) {
     root.classList.remove('live');
     freeResources();
     modeButton.hidden = true;
+    knob.hidden = true;
     return;
   }
-  moved = false; lastFrame = 0; lockTime = 0;
+  showWavelength();
+  moved = false; lastFrame = 0;
   changeDrive(performance.now(), settled);
+  loop();
+}
+
+// The wavelength slider: a new carrier is a new drive, so the page comes in again from scratch.
+function showWavelength() {
+  knobInput.value = String(wavelength);
+  knobOut.textContent = `${R ? Math.round(2 * Math.PI / phys.K) : wavelength} px`;   // as used (the grid may cap it)
+}
+let knobTimer = 0;
+function setWavelength(v) {
+  wavelength = v;
+  try { localStorage.setItem('wavelength', String(v)); } catch (e) { /* not stored */ }
+  if (!R) return;
+  try { layout(); } catch (e) { console.warn('waves: grid for this wavelength failed', e); return; }
+  moved = false;
+  changeDrive(performance.now());
+  showWavelength();
   loop();
 }
 
@@ -854,6 +851,14 @@ function start() {
   try { on = localStorage.getItem('waves') !== 'off'; } catch (e) { /* default on */ }
   modeButton.hidden = false;
   modeButton.addEventListener('click', () => setWaves(!R));
+  let saved = NaN;
+  try { saved = +localStorage.getItem('wavelength'); } catch (e) { /* default */ }
+  wavelength = Math.min(24, Math.max(4, +params.get('wavelength') || saved || WAVELENGTH));
+  knobInput.addEventListener('input', () => {
+    knobOut.textContent = `${knobInput.value} px`;
+    clearTimeout(knobTimer);
+    knobTimer = setTimeout(() => setWavelength(+knobInput.value), 200);
+  });
   setWaves(on, params.has('still'));   // the drives switch on at load
   enableGlide();
 
@@ -874,6 +879,7 @@ canvas.addEventListener('webglcontextlost', e => {
   root.classList.remove('live');
   R = null;
   modeButton.hidden = true;
+  knob.hidden = true;
 });
 
 (document.fonts ? document.fonts.ready : Promise.resolve()).then(start);
