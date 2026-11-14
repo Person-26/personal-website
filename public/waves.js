@@ -1,53 +1,44 @@
 // The page as the 2D slice z = 0 of an electromagnetic wave in open 3D space.
-// Colour is the field: (R, G, B) - background = (E_x, E_y, E_z) on the slice.
 //
-// The screen x in [0,Lx], y in [0,Ly] is a window on the slice, and space is open all round:
-// every edge of the screen and both sides of the slice in z lead out to the far field.
+// The screen x in [0,Lx], y in [0,Ly] is a window on the slice. The light is driven by boundary
+// conditions alone: the incoming field is prescribed where it enters, across the edges of the
+// screen and on the planes z = +-h on either side of the slice; what goes out leaves freely.
 //
 // Nothing is drawn directly. Light is massless, omega = c |k|, and transverse, k . E = 0, so
 // Gauss's law holds for every wave. Each in-plane mode q stands for a bundle of 3D plane waves
 // (q, |q| s) with the tilt s Gaussian (width SIGMA), which is enough to carry any colour below
 // the band limit: across q any tilt carries the field; the part along q and E_z need a tilt.
 // Among the waves with that much spread, the one meeting the page with least energy is used.
-// The waves are sent by currents: one filling each side margin of the screen (outside the text
-// column) and two sheets at z = +-h, parallel to the slice, all shaped to send waves only inward
-// (by the equivalence theorem such currents can produce any field inside the region they
-// bound, and none outside). They are timed so that every wave is in step on the slice T after a
-// change: tau = T - age before that. On the slice a mode is then c (|q| - K) tau out of step
-// with the frame (Omega = c K), and the tilts disagree further by c |q| s^2 tau / 2; the sum
-// over s is exact in closed form (paraxially): a power-law fade, (1 + u^2)^(-1/4) for the
-// across part and (1 + u^2)^(-3/4) for the along part, u = c |q| tau SIGMA^2. So the slice
-// holds the change evolved back by tau: waves that come in across the edges of the screen and
-// interfere, and sharpen in from out of the plane, focusing into
-// the page at tau = 0. While a change is on its way in, the field is cut off past the margin
-// currents and builds up across them; and the slice stays dark for the light time from the sheets,
-// SHEET. c is set so the fastest waves cross the width in T. (A change let go before it arrived
-// is approximated as still arriving in full.)
+// From nothing (at load, or for a new wavelength) the page is sent in as a pulse timed so that
+// every wave is in step on the slice T later: tau = T - age before that. On the slice a mode is
+// then c (|q| - K) tau out of step with the frame (Omega = c K), and the tilts disagree further
+// by c |q| s^2 tau / 2; the sum over s is exact in closed form (paraxially): a power-law fade,
+// (1 + u^2)^(-1/4) for the across part and (1 + u^2)^(-3/4) for the along part,
+// u = c |q| tau SIGMA^2. So the slice holds the change evolved back by tau: waves that come in
+// across the edges of the screen and interfere, and sharpen in from out of the plane, focusing
+// into the page at tau = 0. The slice stays dark for the light time GAP from the z boundaries.
+// c is set so the fastest waves cross the width in T.
+//
+// A page that has arrived is held by the z boundaries sending it continuously at the carrier
+// frequency (every mode q crossing the slice at k_z = sqrt(K^2 - q^2), which is why the band
+// limit sits below K); nothing of it is stored. So a drive change while the drive is running is a
+// switch-over: the boundaries send the new page at once, and each mode of it reaches the slice
+// just as the old one's last wavefront passes, after GAP K / k_z: broad shapes first, fine detail
+// (grazing) last. A pulse still on its way when let go runs on freely by the same formula, tau
+// now negative: it focuses, spreads out of the slice in z and runs out across the edges of the
+// screen. Once a mode has moved a whole screen in x or y it is all in the padding and is dropped,
+// before the periodic transform could bring it back; whatever of a released pulse is still left
+// after D_MAX is dropped too.
 //
 // The transforms: x and y are zero-padded to twice the screen (open: what leaves goes into the
-// padding, not back in). E_x + i E_y
-// share one complex FFT; their spectra are separated with Z(-k) for the along/across split.
-// The field scrolls with the page: every stored field keeps the grid row it was made at and is
-// read shifted by how far the page has moved since. A drive change sends in the whole current
-// page, moved text included, and stops sending the old one. A page that had arrived was being
-// held by the sheets sending it continuously at the carrier frequency (every mode q crossing the
-// slice at k_z = sqrt(K^2 - q^2), which is why the band limit sits below K); nothing of it is
-// stored, so it lasts only until the last wavefront sent has crossed the gap, broad shapes first,
-// fine detail (grazing) last. So a drive change while the drive is running is a switch-over: the
-// currents send the new page at once, and each mode of it reaches the slice just as the old one's
-// last wavefront passes, the same delay (only from nothing, at load or for a new wavelength, is
-// the page sent as a focusing pulse). A pulse still on its way when let go runs on freely by the same
-// formula, tau now negative: it spreads out of the slice in z and runs out
-// across the edges of the screen, the time mirror of how it arrived. (A change let go before it arrived
-// keeps going too: its waves still focus, then run on out.) Once a mode has moved a whole screen
-// in x or y it is all in the padding and is dropped, before the periodic transform could bring it back;
-// whatever of a released field is still left after D_MAX is dropped too.
-// Text scrolled past the top or bottom simply leaves the window.
+// padding, not back in). The field scrolls with the page: every stored field keeps the grid row
+// it was made at and is read shifted by how far the page has moved since. Text scrolled past the
+// top or bottom simply leaves the window.
 // Every change in flight is transformed back each frame with its modes' current phases.
 //
 // Colour is amplitude: the field is the complex envelope of light at the carrier frequency, and
 // each pixel shows (R, G, B) = background +- (|E_x|, |E_y|, |E_z|). The phase is free, so for each
-// page the sheets' field is fitted to it (Gerchberg-Saxton, from a phase pattern fixed to the
+// page the boundaries' field is fitted to it (Gerchberg-Saxton, from a phase pattern fixed to the
 // page) within the band |q| < K: the knob is the carrier wavelength 2 pi / K. A field that fine can
 // only approximate the page; what is left over is what a light field really does when it is made
 // to draw: speckle in the strokes and dark vortices, points where the amplitude is zero and the
@@ -63,7 +54,7 @@ const T_ARRIVE = 4.0;      // s: from a drive change to the slice holding it
 const SIGMA = 0.25;        // spread of the tilt out of the slice (k_z / |q|)
 const D_MAX = 8.0;         // s: drop what is left of a released field after this
 const TAPER = 0.75;        // the band limit rolls off smoothly from this fraction of it
-const SHEET = 0.4;         // s: light time from the z current sheets to the slice
+const GAP = 0.4;           // s: light time from the z boundaries to the slice
 const SLOTS = 3;           // changes arriving, held or leaving at once
 const STEP_GAP = 220;      // ms: at most one drive change per this interval while scrolling
 const MAX_POINTS = 1 << 19;
@@ -99,7 +90,7 @@ void main() {
   o = p.x < N.x && p.y < N.y ? texelFetch(U, p, 0) : vec4(0.0);
 }`;
 
-// Fitting the sheets' field to the page's amplitude, on the screen grid (periodic). Start: the
+// Fitting the boundaries' field to the page's amplitude, on the screen grid (periodic). Start: the
 // page's amplitude with a phase pattern fixed to the page (it moves with the text), per component.
 // Part 0 holds (E_x, E_y), part 1 holds E_z, each complex.
 const FS_GS_INIT = HEAD + `
@@ -119,7 +110,7 @@ void main() {
   o = part == 0 ? vec4(t.r * cis(TAU * hash(n.x, y, 0)), t.g * cis(TAU * hash(n.x, y, 1)))
                 : vec4(t.b * cis(TAU * hash(n.x, y, 2)), 0.0, 0.0);
 }`;
-// Keep only what the sheets can send (|q| below the band limit), conjugated and scaled for the
+// Keep only what the boundaries can send (|q| below the band limit), conjugated and scaled for the
 // inverse transform.
 const FS_GS_BAND = HEAD + `
 uniform sampler2D X;
@@ -176,7 +167,7 @@ void main() {
 const FS_EVOLVE = HEAD + KVEC + `
 uniform sampler2DArray Z;
 uniform int la, part;          // the change's slot; 0: (E_x, E_y), 1: E_z
-uniform float c, K, age, T, sheet, sig, dmax;
+uniform float c, K, age, T, gap, sig, dmax;
 uniform float off;             // s after the start when its drive let go of it (>= 1e8: never)
 uniform int cw;                // 1: switched over from a running drive, not sent as a pulse
 vec2 conj(vec2 z) { return vec2(z.x, -z.y); }
@@ -195,25 +186,25 @@ void main() {
   vec2 k = kvec(n);
   float m = length(k);
   float tau = T - age, env = 1.0;
-  // Each mode's light crosses the gap from the sheets along z at c k_z / K.
-  float cross = sheet * K / sqrt(max(K * K - m * m, 1e-4 * K * K));
+  // Each mode's light crosses the gap from the z boundaries along z at c k_z / K.
+  float cross = gap * K / sqrt(max(K * K - m * m, 1e-4 * K * K));
   if (cw == 1) {
-    // The currents switched to this page while running: its light comes right behind the old
+    // The boundaries switched to this page while running: its light comes right behind the old
     // page's, each mode taking over as the old one's last wavefront passes, broad shapes first.
     tau = 0.0;
     env = smoothstep(cross - 0.15, cross + 0.15, age);
     if (off < 1e8) env *= 1.0 - smoothstep(cross - 0.15, cross + 0.15, age - off);
   } else if (age < T) {
-    // Light from the current sheets above and below needs sheet s to reach the slice.
-    env = smoothstep(0.5 * sheet, 1.5 * sheet, age);
+    // Light from the z boundaries needs gap s to reach the slice.
+    env = smoothstep(0.5 * gap, 1.5 * gap, age);
   } else if (off < T) {
     // Let go while still on its way: the pulse already sent keeps going, focuses, and runs on
     // freely, out of the slice in z and out of the screen in x and y.
     tau = T - age;
   } else {
-    // Arrived and held: from T on the sheets send it continuously at the carrier frequency, each
+    // Arrived and held: from T on the z boundaries send it continuously at the carrier frequency, each
     // mode q as waves crossing the slice at k_z = sqrt(K^2 - q^2). Nothing is stored; once the
-    // currents stop, the field lasts until the last wavefront they sent has crossed the gap,
+    // boundaries stop sending it, the field lasts until the last wavefront they sent has crossed the gap,
     // whose edge moves along z at c k_z / K: broad shapes go first, fine detail (grazing) last.
     tau = 0.0;
     env = 1.0 - smoothstep(cross - 0.15, cross + 0.15, age - off);
@@ -279,14 +270,9 @@ uniform int slot[${SLOTS}];
 uniform int shift[${SLOTS}];   // rows the page has moved since each was made
 uniform float held[${SLOTS}];  // 1: arrived and held, its field is G
 uniform float gpart[${SLOTS}]; // how much of its arrived field to use where its waves are cut off
-uniform float coming[${SLOTS}];// 1: still on its way in, from the margin currents
-uniform vec2 margin;          // grid x where the text column starts and ends
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
   vec4 a = vec4(0.0); vec2 b = vec2(0.0);
-  // The margin currents send their waves inward only: none outside them, building up across them.
-  float x = float(n.x) + 0.5;
-  float inside = smoothstep(0.0, margin.x, x) * (1.0 - smoothstep(margin.y, float(N.x), x));
   for (int j = 0; j < ${SLOTS}; j++) {
     if (j >= count) break;
     int y = n.y + shift[j];
@@ -298,9 +284,8 @@ void main() {
     // onto the screen, let them fade out instead of stopping at a line.
     float edge = shift[j] > 0 ? float(N.y - 1 - y) : shift[j] < 0 ? float(y) : 1e9;
     float t = smoothstep(0.0, 40.0, edge);
-    float w = mix(1.0, inside, coming[j]);
-    a += w * (t * texelFetch(F, q0, 0) + (1.0 - t) * gpart[j] * ga);
-    b += w * (t * texelFetch(F, q1, 0).xy + (1.0 - t) * gpart[j] * gb);
+    a += t * texelFetch(F, q0, 0) + (1.0 - t) * gpart[j] * ga;
+    b += t * texelFetch(F, q1, 0).xy + (1.0 - t) * gpart[j] * gb;
   }
   o = vec4(sgn * vec3(length(a.xy), length(a.zw), length(b)), 0.0);
 }`;
@@ -447,7 +432,6 @@ function run(prog, fbo, w, h, tex, set) {
 // ---------------------------------------------------------------- state
 let Lx = 0, Ly = 0, Nx = 0, Ny = 0;
 let wavelength = WAVELENGTH;
-let margins = [0, 0];   // CSS px: where the text column starts and ends (the drive currents fill the rest)
 const phys = { kc: 0, K: 0, c: 0, done: 0, swap: 0 };
 let R = null;
 // Every change the drives have made that is still on the slice, oldest first: its page was
@@ -483,7 +467,7 @@ function allocate() {
 }
 
 // The field's band limit for a carrier wavelength (K a little above it, so that every mode the
-// sheets hold crosses the slice at a real angle).
+// boundaries hold crosses the slice at a real angle).
 const bandFor = lam => 2 * Math.PI / lam / Math.sqrt(1 + EPS);
 function setPhysics() {
   // The amplitude has twice the field's band; the grid is sized for it, or caps it if too coarse.
@@ -491,7 +475,7 @@ function setPhysics() {
   const K = Math.sqrt(1 + EPS) * kc;
   const c = 0.95 * Lx / T_ARRIVE;                  // the fastest waves cross the width in T
   // done: a pulse has arrived; swap: every mode of a switch-over has crossed (finest last).
-  Object.assign(phys, { kc, K, c, done: T_ARRIVE + 0.05, swap: SHEET * K / Math.sqrt(K * K - kc * kc) + 0.2 });
+  Object.assign(phys, { kc, K, c, done: T_ARRIVE + 0.05, swap: GAP * K / Math.sqrt(K * K - kc * kc) + 0.2 });
 }
 
 // ---------------------------------------------------------------- page -> drive
@@ -576,7 +560,7 @@ function capture(tl, row) {
   gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, tl, Nx, Ny, 1, gl.RGBA, gl.FLOAT, data);
 }
 
-// The sheets' field for the captured page (R.T layer 0, captured at grid row `row`): its phase
+// The boundaries' field for the captured page (R.T layer 0, captured at grid row `row`): its phase
 // fitted so that its amplitude comes as close to the page as the band allows, then its
 // band-limited spectrum into R.Z at the slot's two layers.
 function coefFor(slot, row) {
@@ -614,7 +598,7 @@ function fieldOf(slot, age, dst, off = 1e9, cw = false) {
       gl.uniform1i(u.la, slot); gl.uniform1i(u.part, part);
       gl.uniform2f(u.kscale, Math.PI / Lx, Math.PI / Ly);
       gl.uniform1f(u.c, phys.c); gl.uniform1f(u.K, phys.K); gl.uniform1f(u.age, age);
-      gl.uniform1f(u.T, T_ARRIVE); gl.uniform1f(u.sheet, SHEET);
+      gl.uniform1f(u.T, T_ARRIVE); gl.uniform1f(u.gap, GAP);
       gl.uniform1f(u.sig, SIGMA); gl.uniform1f(u.dmax, D_MAX); gl.uniform1f(u.off, off);
       gl.uniform1i(u.cw, cw ? 1 : 0);
     });
@@ -660,13 +644,13 @@ function changeDrive(now, settled) {
     } else if (slot >= SLOTS) {
       return false;
     } else {
-      // With a drive running, the currents switch over and the new light follows the old;
+      // With a drive running, the boundaries switch over and the new light follows the old;
       // from nothing (first load, new wavelength), the page is sent in as a focusing pulse.
       const cw = steps.some(o => isCur(o, now));
       for (const o of steps) if (isCur(o, now)) o.off = now;   // let go of what it held
       const s = { row, t: now, slot, off: Infinity, cw };
       capture(0, row);
-      coefFor(slot, row);                   // the whole page, sent in by the currents
+      coefFor(slot, row);                   // the whole page, sent in across the boundaries
       fieldOf(slot, 1e6, R.G);
       steps.push(s);
     }
@@ -681,18 +665,16 @@ function compositeInto(fbo, rowC, now) {
     gl.uniform2i(u.N, Nx, Ny);
     gl.uniform3fv(u.sgn, colors.sgn);
     const slot = new Int32Array(SLOTS), shift = new Int32Array(SLOTS);
-    const held = new Float32Array(SLOTS), gpart = new Float32Array(SLOTS), coming = new Float32Array(SLOTS);
+    const held = new Float32Array(SLOTS), gpart = new Float32Array(SLOTS);
     steps.forEach((s, i) => {
       slot[i] = s.slot; shift[i] = rowC - s.row;
       held[i] = isHeld(s, now) ? 1 : 0;
       const a = ageOf(s, now), x = Math.min(1, Math.max(0, (a - 0.75 * T_ARRIVE) / (phys.done - 0.75 * T_ARRIVE)));
       gpart[i] = isCur(s, now) && !s.cw ? x * x * (3 - 2 * x) : 0;
-      coming[i] = !s.cw && a < T_ARRIVE ? 1 : 0;
     });
     gl.uniform1i(u.count, steps.length);
     gl.uniform1iv(u.slot, slot); gl.uniform1iv(u.shift, shift);
-    gl.uniform1fv(u.held, held); gl.uniform1fv(u.gpart, gpart); gl.uniform1fv(u.coming, coming);
-    gl.uniform2f(u.margin, margins[0] * Nx / Lx, margins[1] * Nx / Lx);
+    gl.uniform1fv(u.held, held); gl.uniform1fv(u.gpart, gpart);
   });
 }
 
@@ -811,9 +793,6 @@ function layout() {
   let nx = Math.min(cap, pow2Near(density * Lx)), ny = Math.min(cap, pow2Near(density * Ly));
   while (nx * ny > maxPoints) { if (nx / Lx > ny / Ly) nx /= 2; else ny /= 2; }
   Nx = nx; Ny = ny;
-  const box = doc.getBoundingClientRect(), cs = getComputedStyle(doc);
-  const left = box.left + parseFloat(cs.paddingLeft), right = box.right - parseFloat(cs.paddingRight);
-  margins = [Math.max(1, left), Math.min(Lx - 1, right)];
   allocate();
   setPhysics();
 }
