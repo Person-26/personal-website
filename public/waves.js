@@ -26,22 +26,20 @@
 // then spreads out in rings, and the rings from everywhere interfere into the page.
 //
 // A face switched everywhere at once sends its change straight across: the tilted waves' sideways
-// parts cancel, and the change appears on the whole screen together. So the faces switch
-// progressively instead, from the screen's left and right edges inward (reaching the middle after
-// SWEEP s): the tilted waves from the part already switched run on sideways into the part not
-// yet switched, and the change comes in from the sides. Each change is split into RANKS strips by
-// distance from the edges (soft, overlapping), each switched at its own time; each strip's
-// response is exact, and they add up.
-//
-// The drive for a page: each frequency w's share of the page (its intensity, the phase free) is
-// fitted with the patterns that can cross (a few rounds of Gerchberg-Saxton, starting from the
-// phase the field already has, so what has not changed stays as it is). The faces then send in
-// exactly the waves that add up to that fit in the middle. The fit leaves what light really does
-// when made to draw: rings and coloured fringes where the frequencies disagree.
-//
-// Every page change is kept, as a spectrum, until its slowest pattern has arrived; the middle at
-// time t is, pattern by pattern, the latest change that has reached it. The field scrolls with the
-// page (a shift is a phase factor on the spectrum).
+// parts cancel, and the change appears on the whole screen together, as a fade. Two things in the
+// drive make the waves show instead, both still only what the faces send:
+//  - The light is slanted. The fit starts from (and keeps) a phase that tilts the light carrying
+//    the left half of the page rightward and the right half leftward (sin = TILT). Tilt is only
+//    phase, so the standing page is unchanged, but that light travels sideways as it crosses.
+//  - A change is sent out of focus first. The faces send it focused DEFOCUS wavelengths from the
+//    screen (a phase (kz - k) x distance on each pattern), then pull the focus onto the screen
+//    over FOCUS s. Out of focus, the page is its own diffraction pattern: fringes and rings
+//    round every edge, and, the light being slanted, each half displaced toward its own side.
+//    As the focus comes in, the two halves travel in from left and right and the rings close
+//    into the text.
+// The response to that moving focus is exact too: the same signalling solution, with the
+// drive's changing phase inside the integral (so a fast-moving focus shifts each pattern's
+// frequency, as it must), tabulated once.
 (() => {
 'use strict';
 
@@ -67,12 +65,16 @@ const TAPER = 0.75;        // ... rolling off smoothly from this fraction of tha
 const GS_ITERS = 6;        // phase-fit rounds per page change
 const RING = 12;           // grid points around the screen left free by the fit
 const RAMP = 0.25;         // s: the faces fade over to a new drive over this
-const MAX_SNAP = 3;        // page changes kept in flight at most
-const RANKS = 4;           // strips from the edges to the middle, each switched at its own time
-const SWEEP = 1.2;         // s: from the edges' switch to the middle's
+const DEFOCUS = -150;      // wavelengths at 10 Hz: a change is first sent focused this far from the screen
+                           // (negative: beyond it, so slanted light starts on its own side) ...
+const FOCUS = 3;           // s: ... and the faces pull the focus onto the screen over this
+const TILT = 0.25;         // sin of the slant of the light carrying each half of the page, toward the middle
+const MAX_SNAP = 4;        // page changes kept in flight at most
+const RANKS = 1;           // strips from the edges to the middle, each switched at its own time (1: all at once)
+const SWEEP = 0;           // s: from the edges' switch to the middle's
 const STEP_GAP = 220;      // ms: at most one drive change per this interval while scrolling
 const HT = DEPTH / F_REF;  // s: the head-on crossing time h / c
-const ARRIVE = HT + 2.5;   // s: the response is tabulated up to this age ...
+const ARRIVE = HT + FOCUS + 2;   // s: the response is tabulated up to this age ...
 const SETTLE_BLEND = 1;    // s: ... its last slow ringing faded out over this, before the end
 const NQ = 128, NA = 512;  // table size: pattern sizes 0..k; ages 0..ARRIVE
 const DONE = SWEEP + ARRIVE;   // s: until a change has fully arrived everywhere
@@ -138,13 +140,17 @@ uniform sampler2D T, C;        // the page (linear sRGB); the field now (conjuga
 uniform int cs, hasC;
 uniform ivec2 F;
 uniform vec3 share[2];         // this part's two rows of MIX
+uniform vec2 k;                // this part's two wavenumbers, radians per grid point
+uniform float xc;              // the screen's middle column
 // The phase to start from: the field's own where it already has about the right strength (it
-// is showing this page), flat where it does not (dark, or still showing something else).
-vec2 seed(vec2 z, float a) {
+// is showing this page); elsewhere that of light slanted toward the middle, from the left on
+// the left half and from the right on the right.
+vec2 seed(vec2 z, float a, float tilt) {
   float m = length(z);
   float trust = m > 1e-6 ? 1.0 - smoothstep(0.08, 0.25, abs(m - a)) : 0.0;
-  vec2 u = trust * (m > 1e-6 ? z / m : vec2(1.0, 0.0)) + vec2(1.0 - trust + 1e-4, 0.0);
-  return u / length(u);
+  vec2 u = trust * (m > 1e-6 ? z / m : vec2(1.0, 0.0)) + (1.0 - trust + 1e-4) * cis(tilt);
+  float l = length(u);
+  return l > 1e-6 ? u / l : cis(tilt);
 }
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
@@ -153,7 +159,8 @@ void main() {
   vec4 c = vec4(0.0);
   int y = n.y + cs;
   if (hasC == 1 && y >= 0 && y < F.y) c = texelFetch(C, ivec2(n.x, y), 0);
-  o = vec4(a0 * seed(vec2(c.x, -c.y), a0), a1 * seed(vec2(c.z, -c.w), a1));
+  vec2 tilt = -${TILT} * k * abs(float(n.x) + 0.5 - xc);
+  o = vec4(a0 * seed(vec2(c.x, -c.y), a0, tilt.x), a1 * seed(vec2(c.z, -c.w), a1, tilt.y));
 }`;
 // Keep only the patterns that can cross, conjugated and scaled for the inverse transform.
 const FS_GS_BAND = HEAD + Q + `
@@ -235,7 +242,7 @@ void main() {
     int m = ((n.y * sh[j]) % F.y + F.y) % F.y;
     vec2 e = cis(6.28318531 * float(m) / float(F.y));
     for (int r = 0; r < ${RANKS}; r++) {
-      float delay = ${SWEEP.toFixed(3)} * float(r) / ${RANKS - 1}.0;
+      float delay = ${RANKS > 1 ? `${SWEEP.toFixed(3)} * float(r) / ${RANKS - 1}.0` : '0.0'};
       vec4 w = j == 0 && fromDark == 0 ? vec4(1.0, 0.0, 1.0, 0.0) : resp(qk, age[j] - delay);
       if (j + 1 < count) w -= resp(qk, age[j + 1] - delay);
       if (w == vec4(0.0)) continue;
@@ -449,12 +456,14 @@ function besselJ1(x) {
   const p2 = 0.04687499995 + y * (-0.2002690873e-3 + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
   return Math.sqrt(0.636619772 / ax) * (Math.cos(xx) * p1 - z * Math.sin(xx) * p2) * Math.sign(x);
 }
-function responseTables() {
+function computeResponse() {
   const ramp = x => x <= 0 ? 0 : x >= RAMP ? 1 : 0.5 - 0.5 * Math.cos(Math.PI * x / RAMP);
-  const DT = 1 / 600;                                  // s: integration step
-  const NT = Math.ceil((ARRIVE - HT) / DT) + 1, NR = Math.round(RAMP / DT);
+  const DT = 1 / 300;                                  // s: integration step
+  const NT = Math.ceil((ARRIVE - HT) / DT) + 1;
+  const NM = Math.ceil(Math.max(FOCUS, RAMP) / DT) + 1;   // the drive is steady after this many steps
   const tables = [new Float32Array(NQ * NA * 4), new Float32Array(NQ * NA * 4)];
   const pr = new Float64Array(NT), pi = new Float64Array(NT), cr = new Float64Array(NT + 1), ci = new Float64Array(NT + 1);
+  const mr = new Float64Array(NM + 1), mi = new Float64Array(NM + 1);
   for (let b = 0; b < 3; b++) {
     const w = 2 * Math.PI * FREQ[b], cT = HT;          // units: time in s, lengths in c * s
     const k = w;                                       // k = w / c with c = 1
@@ -462,26 +471,35 @@ function responseTables() {
     const tab = tables[b >> 1], ch = (b & 1) * 2;
     for (let iq = 0; iq < NQ; iq++) {
       const q = k * iq / (NQ - 1), m = q;              // m = c q
+      const kz = Math.sqrt(Math.max(k * k - q * q, 0));
       for (let i = 0; i < NT; i++) {                   // the kernel times e^{i w tau}, tau = T + i DT
         const tau = cT + i * DT, s2 = Math.sqrt(Math.max(tau * tau - cT * cT, 0));
         const kv = q * h * (s2 > 1e-9 ? besselJ1(m * s2) / s2 : m / 2) * DT * (i === 0 ? 0.5 : 1);
         pr[i] = kv * Math.cos(w * tau); pi[i] = kv * Math.sin(w * tau);
         cr[i + 1] = cr[i] + pr[i]; ci[i + 1] = ci[i] + pi[i];
       }
-      const ph = h * Math.sqrt(Math.max(k * k - q * q, 0));
-      const nr = Math.cos(-ph), ni = Math.sin(-ph);    // divide by the steady state
+      // What the faces send for this pattern, relative to the steady drive: switched on over
+      // RAMP, focused DEFOCUS wavelengths from the screen at first (a phase (kz - k) x
+      // distance on each pattern), the focus pulled in over FOCUS, slowing to a stop.
+      const dphi = (kz - k) * DEFOCUS / F_REF;
+      for (let i = 0; i <= NM; i++) {
+        const sT = i * DT, u = Math.min(1, sT / FOCUS), ph = dphi * (1 - u) * (1 - u), am = ramp(sT);
+        mr[i] = am * Math.cos(ph); mi[i] = am * Math.sin(ph);
+      }
+      const nr = Math.cos(-h * kz), ni = Math.sin(-h * kz);   // divide by the steady state
       for (let ia = 0; ia < NA; ia++) {
         const a = ARRIVE * ia / (NA - 1);
         let er = 0, ei = 0;
         if (a > cT) {
-          const sa = ramp(a - cT);
-          er = Math.cos(w * cT) * sa; ei = Math.sin(w * cT) * sa;
           const last = Math.min(NT - 1, Math.floor((a - cT) / DT));
-          const full = last - NR;                       // S = 1 up to here
+          const l0 = Math.min(last, NM);
+          const c0 = Math.cos(w * cT), s0 = Math.sin(w * cT);
+          er = c0 * mr[l0] - s0 * mi[l0]; ei = c0 * mi[l0] + s0 * mr[l0];
+          const full = last - NM;                       // the drive was steady up to here
           if (full >= 0) { er -= cr[full + 1]; ei -= ci[full + 1]; }
           for (let i = Math.max(0, full + 1); i <= last; i++) {
-            const sv = ramp(a - cT - i * DT);
-            er -= pr[i] * sv; ei -= pi[i] * sv;
+            const j = last - i;
+            er -= pr[i] * mr[j] - pi[i] * mi[j]; ei -= pr[i] * mi[j] + pi[i] * mr[j];
           }
         }
         let rr = er * nr - ei * ni, ri = er * ni + ei * nr;
@@ -493,6 +511,12 @@ function responseTables() {
       }
     }
   }
+  return tables;
+}
+let tableData = null;          // the tables depend on nothing in the layout: computed once
+function responseTables() {
+  if (!tableData) tableData = computeResponse();
+  const tables = tableData;
   return tables.map(data => {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
@@ -609,6 +633,7 @@ function fitDrive(slot, row) {
     const kc = kcOf(part);
     run(P.gsInit, pair[0].f, FX, FY, { T, C: R.cur[part].t }, u => {
       gl.uniform2i(u.F, FX, FY); gl.uniform3fv(u.share, share);
+      gl.uniform2f(u.k, phys.k[2 * part], phys.k[2 * part + 1] || phys.k[2]); gl.uniform1f(u.xc, OX + W / 2);
       gl.uniform1i(u.cs, row - curRow); gl.uniform1i(u.hasC, hasCur ? 1 : 0);
     });
     let a = 0;
@@ -698,7 +723,7 @@ function hud() {
   const x = snaps.length ? Math.min(1, (t - snaps[snaps.length - 1].t0) / DONE) : 0;
   hudText.textContent =
     `colour = what the eye sees of light at ${LAMBDA.join(', ')} nm, run at ${FREQ.map(f => f.toFixed(1)).join(', ')} Hz · ` +
-    `sent in only from the faces of a slab ${DEPTH * 2} wavelengths thick, switched from the sides inward · wavelength at 10 Hz ${Math.round(phys.wl)} px · ` +
+    `sent in only from the faces of a slab ${DEPTH * 2} wavelengths thick, out of focus first, then focused · wavelength at 10 Hz ${Math.round(phys.wl)} px · ` +
     `${x >= 1 ? 'standing' : `arriving ${Math.round(100 * x)}%`}`;
 }
 
