@@ -17,12 +17,21 @@
 // The slab is uniform, so it is solved exactly, one in-plane pattern q at a time, with FFTs instead
 // of time steps. Pattern q at frequency w crosses the slab as a plane wave tilted by sin(theta) =
 // |q| / k (k = w / c), if |q| < k; finer patterns die out within a wavelength of the face and
-// never reach the middle (so the page can only be held to about half a wavelength). Its envelope
-// crosses at c cos(theta): a change sent in at the faces at time t0 reaches the middle at
-// t0 + h / (c cos(theta)). Head-on patterns (coarse shapes) arrive first, tilted ones (fine detail)
-// later; that is the formation you see, the standing pattern coming into focus. (The envelope
-// is taken to travel undistorted: a slowly varying envelope, accurate since a change takes
-// several periods.)
+// never reach the middle (so the page can only be held to about half a wavelength). For each
+// pattern the crossing is a 1D Klein-Gordon problem in z (u_tt = c^2 u_zz - c^2 q^2 u), whose
+// response to a wave switched on at a face is known exactly (the signalling solution): nothing
+// until h / c, then a ringing front that settles to the steady state. That response, E(|q|, age),
+// is tabulated once per layout. In space, it is every point of the faces sending out a spherical
+// wavelet: on the screen each change first appears straight across from where it was sent,
+// then spreads out in rings, and the rings from everywhere interfere into the page.
+//
+// A face switched everywhere at once sends its change straight across: the tilted waves' sideways
+// parts cancel, and the change appears on the whole screen together. So the faces switch
+// progressively instead, from the screen's left and right edges inward (reaching the middle after
+// SWEEP s): the tilted waves from the part already switched run on sideways into the part not
+// yet switched, and the change comes in from the sides. Each change is split into RANKS strips by
+// distance from the edges (soft, overlapping), each switched at its own time; each strip's
+// response is exact, and they add up.
 //
 // The drive for a page: each frequency w's share of the page (its intensity, the phase free) is
 // fitted with the patterns that can cross (a few rounds of Gerchberg-Saxton, starting from the
@@ -50,7 +59,7 @@ const SEE = [
   [1.37121, -0.12184, -0.02223],
 ];
 const MIX = [[0.01429, 0.08145, 0.73388], [0.05097, 0.87585, 0.04892], [0.60214, 0.22381, 0.01526], [0, 0, 0]];
-const DEPTH = 10;          // the slab's half-thickness h, in wavelengths at 10 Hz
+const DEPTH = 4;           // the slab's half-thickness h, in wavelengths at 10 Hz
 const PPW = 2.5;           // grid points per wavelength of the finest (blue) light
 const MAX_TEXELS = 1 << 20;   // grid points at most (else the wavelength is made longer)
 const BAND = 0.9;          // patterns fitted up to this fraction of each frequency's wavenumber
@@ -58,10 +67,15 @@ const TAPER = 0.75;        // ... rolling off smoothly from this fraction of tha
 const GS_ITERS = 6;        // phase-fit rounds per page change
 const RING = 12;           // grid points around the screen left free by the fit
 const RAMP = 0.25;         // s: the faces fade over to a new drive over this
-const MAX_SNAP = 4;        // page changes kept in flight at most
+const MAX_SNAP = 3;        // page changes kept in flight at most
+const RANKS = 4;           // strips from the edges to the middle, each switched at its own time
+const SWEEP = 1.2;         // s: from the edges' switch to the middle's
 const STEP_GAP = 220;      // ms: at most one drive change per this interval while scrolling
 const HT = DEPTH / F_REF;  // s: the head-on crossing time h / c
-const ARRIVE = RAMP + HT / Math.sqrt(1 - BAND * BAND);   // s: until the slowest pattern is in
+const ARRIVE = HT + 2.5;   // s: the response is tabulated up to this age ...
+const SETTLE_BLEND = 1;    // s: ... its last slow ringing faded out over this, before the end
+const NQ = 128, NA = 512;  // table size: pattern sizes 0..k; ages 0..ARRIVE
+const DONE = SWEEP + ARRIVE;   // s: until a change has fully arrived everywhere
 
 const root = document.documentElement;
 const canvas = document.getElementById('field');
@@ -78,6 +92,7 @@ try {
   gl = canvas.getContext('webgl2', { antialias: false, depth: false, stencil: false, alpha: false });
 } catch (e) { gl = null; }
 if (!gl || !gl.getExtension('EXT_color_buffer_float')) return;   // the plain HTML page stays
+const LINEAR = !!gl.getExtension('OES_texture_float_linear');     // filtered table lookups
 
 // ---------------------------------------------------------------- shaders
 // The grid (F.x x F.y, powers of two, periodic) holds the screen at off and a free ring around it.
@@ -180,36 +195,67 @@ void main() {
   o = texelFetch(X, n, 0) * vec4(w.x, w.x, w.y, w.y);
 }`;
 
-// The middle now, pattern by pattern: each kept change weighted by how much of it has arrived
-// (and not yet been overtaken by the next), shifted to where the page is now. Conjugated for the
-// inverse transform.
+// The middle now, pattern by pattern: each kept change times the response to it so far (less
+// the response to the next change, which replaces it), shifted to where the page is now.
+// Conjugated for the inverse transform.
 const FS_COMBINE = HEAD + CPLX + Q + `
 uniform sampler2DArray S;
-uniform int count, fromDark;
-uniform int lay[${MAX_SNAP}], sh[${MAX_SNAP}];
+uniform sampler2D E;           // the response E(|q| / k, age), the part's two frequencies
+uniform int count, fromDark, part;
+uniform int slot[${MAX_SNAP}], sh[${MAX_SNAP}];
 uniform float age[${MAX_SNAP}];
 uniform vec2 k;                // the part's two wavenumbers, radians per grid point
-uniform float ht, ramp;
-vec2 arrived(float a, vec2 tau) {   // fraction of a change of age a in, after delay tau
-  vec2 x = clamp((a - tau) / ramp, 0.0, 1.0);
-  return 0.5 - 0.5 * cos(3.14159265 * x);
+vec4 at(vec2 qk, float a) {    // the table, bilinear
+  float y = a / ${ARRIVE.toFixed(3)} * ${NA - 1}.0;
+  vec2 x = clamp(qk, 0.0, 1.0) * ${NQ - 1}.0;
+  ${LINEAR ? `
+  vec2 r = texture(E, vec2((x.x + 0.5) / ${NQ}.0, (y + 0.5) / ${NA}.0)).xy;
+  vec2 g = texture(E, vec2((x.y + 0.5) / ${NQ}.0, (y + 0.5) / ${NA}.0)).zw;
+  return vec4(r, g);` : `
+  int y0 = int(floor(y)); float fy = y - float(y0);
+  ivec2 x0 = ivec2(floor(x)); vec2 fx = x - vec2(x0);
+  ivec2 x1 = min(x0 + 1, ${NQ - 1}); int y1 = min(y0 + 1, ${NA - 1});
+  vec4 r0 = mix(texelFetch(E, ivec2(x0.x, y0), 0), texelFetch(E, ivec2(x1.x, y0), 0), fx.x);
+  vec4 r1 = mix(texelFetch(E, ivec2(x0.x, y1), 0), texelFetch(E, ivec2(x1.x, y1), 0), fx.x);
+  vec4 g0 = mix(texelFetch(E, ivec2(x0.y, y0), 0), texelFetch(E, ivec2(x1.y, y0), 0), fx.y);
+  vec4 g1 = mix(texelFetch(E, ivec2(x0.y, y1), 0), texelFetch(E, ivec2(x1.y, y1), 0), fx.y);
+  return vec4(mix(r0, r1, fy).xy, mix(g0, g1, fy).zw);`}
+}
+vec4 resp(vec2 qk, float a) {  // 0 before the front, 1 once settled
+  if (a >= ${ARRIVE.toFixed(3)}) return vec4(1.0, 0.0, 1.0, 0.0);
+  if (a <= ${HT.toFixed(3)}) return vec4(0.0);
+  return at(qk, a);
 }
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  float q = qlen(n);
-  vec2 c = sqrt(max(1.0 - (q / k) * (q / k), 0.0));
-  vec2 tau = ht / max(c, 0.05);
+  vec2 qk = qlen(n) / k;
   vec4 sum = vec4(0.0);
   for (int j = 0; j < ${MAX_SNAP}; j++) {
     if (j >= count) break;
-    vec2 w = j == 0 && fromDark == 0 ? vec2(1.0) : arrived(age[j], tau);
-    if (j + 1 < count) w -= arrived(age[j + 1], tau);
-    vec4 d = texelFetch(S, ivec3(n, lay[j]), 0);
     int m = ((n.y * sh[j]) % F.y + F.y) % F.y;
     vec2 e = cis(6.28318531 * float(m) / float(F.y));
-    sum += vec4(w.x * cmul(d.xy, e), w.y * cmul(d.zw, e));
+    for (int r = 0; r < ${RANKS}; r++) {
+      float delay = ${SWEEP.toFixed(3)} * float(r) / ${RANKS - 1}.0;
+      vec4 w = j == 0 && fromDark == 0 ? vec4(1.0, 0.0, 1.0, 0.0) : resp(qk, age[j] - delay);
+      if (j + 1 < count) w -= resp(qk, age[j + 1] - delay);
+      if (w == vec4(0.0)) continue;
+      vec4 d = texelFetch(S, ivec3(n, (slot[j] * ${RANKS} + r) * 2 + part), 0);
+      sum += vec4(cmul(w.xy, cmul(d.xy, e)), cmul(w.zw, cmul(d.zw, e)));
+    }
   }
   o = vec4(sum.x, -sum.y, sum.z, -sum.w);
+}`;
+// One strip of the fitted field: by distance from the screen's left and right edges (0 at the
+// edges, RANKS at the middle), soft hats that add up to one.
+const FS_MASK = HEAD + `
+uniform sampler2D X;
+uniform int r, ox, w;
+void main() {
+  ivec2 n = ivec2(gl_FragCoord.xy);
+  float x = float(n.x - ox) + 0.5;
+  float d = min(x, float(w) - x) / (0.5 * float(w)) * ${RANKS}.0 - 0.5;
+  float m = max(0.0, 1.0 - abs(clamp(d, 0.0, ${RANKS - 1}.0) - float(r)));
+  o = texelFetch(X, n, 0) * m;
 }`;
 const FS_COPY = HEAD + `
 uniform sampler2D X;
@@ -287,7 +333,7 @@ try {
   };
   P = {
     fft: program(FS_FFT), gsInit: program(FS_GS_INIT), gsBand: program(FS_GS_BAND), gsPhase: program(FS_GS_PHASE),
-    store: program(FS_STORE), combine: program(FS_COMBINE), copy: program(FS_COPY),
+    store: program(FS_STORE), combine: program(FS_COMBINE), copy: program(FS_COPY), mask: program(FS_MASK),
     see: program(FS_SEE), disp: program(FS_DISPLAY),
   };
 } catch (e) {
@@ -380,9 +426,84 @@ const pow2AtLeast = n => 1 << Math.ceil(Math.log2(Math.max(2, n)));
 
 function freeResources() {
   if (!R) return;
-  for (const r of [...R.pair, R.page, ...R.cur, R.see]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
+  for (const r of [...R.pair, R.keep, R.page, ...R.cur, R.see]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
   gl.deleteTexture(R.S.t); R.S.fbos.forEach(f => gl.deleteFramebuffer(f));
+  R.E.forEach(e => gl.deleteTexture(e));
   R = null;
+}
+
+// The exact response of the middle to a wave switched on (over RAMP) at the faces, for each
+// frequency, pattern size |q| = k x (x = 0..1, NQ samples) and age (0..ARRIVE, NA samples),
+// relative to its steady state: the Klein-Gordon signalling solution
+//   u(t) = f(t - T) - q h int_T^t J1(c q sqrt(tau^2 - T^2)) / sqrt(tau^2 - T^2) f(t - tau) dtau,
+// T = h / c, f = e^{-i w t} S(t), divided by the steady state e^{-i w t} e^{i h sqrt(k^2 - q^2)}.
+function besselJ1(x) {
+  const ax = Math.abs(x);
+  if (ax < 8) {
+    const y = x * x;
+    return x * (72362614232.0 + y * (-7895059235.0 + y * (242396853.1 + y * (-2972611.439 + y * (15704.48260 + y * -30.16036606))))) /
+      (144725228442.0 + y * (2300535178.0 + y * (18583304.74 + y * (99447.43394 + y * (376.9991397 + y)))));
+  }
+  const z = 8 / ax, y = z * z, xx = ax - 2.356194491;
+  const p1 = 1 + y * (0.183105e-2 + y * (-0.3516396496e-4 + y * (0.2457520174e-5 + y * -0.240337019e-6)));
+  const p2 = 0.04687499995 + y * (-0.2002690873e-3 + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
+  return Math.sqrt(0.636619772 / ax) * (Math.cos(xx) * p1 - z * Math.sin(xx) * p2) * Math.sign(x);
+}
+function responseTables() {
+  const ramp = x => x <= 0 ? 0 : x >= RAMP ? 1 : 0.5 - 0.5 * Math.cos(Math.PI * x / RAMP);
+  const DT = 1 / 600;                                  // s: integration step
+  const NT = Math.ceil((ARRIVE - HT) / DT) + 1, NR = Math.round(RAMP / DT);
+  const tables = [new Float32Array(NQ * NA * 4), new Float32Array(NQ * NA * 4)];
+  const pr = new Float64Array(NT), pi = new Float64Array(NT), cr = new Float64Array(NT + 1), ci = new Float64Array(NT + 1);
+  for (let b = 0; b < 3; b++) {
+    const w = 2 * Math.PI * FREQ[b], cT = HT;          // units: time in s, lengths in c * s
+    const k = w;                                       // k = w / c with c = 1
+    const h = HT;                                      // h = c T
+    const tab = tables[b >> 1], ch = (b & 1) * 2;
+    for (let iq = 0; iq < NQ; iq++) {
+      const q = k * iq / (NQ - 1), m = q;              // m = c q
+      for (let i = 0; i < NT; i++) {                   // the kernel times e^{i w tau}, tau = T + i DT
+        const tau = cT + i * DT, s2 = Math.sqrt(Math.max(tau * tau - cT * cT, 0));
+        const kv = q * h * (s2 > 1e-9 ? besselJ1(m * s2) / s2 : m / 2) * DT * (i === 0 ? 0.5 : 1);
+        pr[i] = kv * Math.cos(w * tau); pi[i] = kv * Math.sin(w * tau);
+        cr[i + 1] = cr[i] + pr[i]; ci[i + 1] = ci[i] + pi[i];
+      }
+      const ph = h * Math.sqrt(Math.max(k * k - q * q, 0));
+      const nr = Math.cos(-ph), ni = Math.sin(-ph);    // divide by the steady state
+      for (let ia = 0; ia < NA; ia++) {
+        const a = ARRIVE * ia / (NA - 1);
+        let er = 0, ei = 0;
+        if (a > cT) {
+          const sa = ramp(a - cT);
+          er = Math.cos(w * cT) * sa; ei = Math.sin(w * cT) * sa;
+          const last = Math.min(NT - 1, Math.floor((a - cT) / DT));
+          const full = last - NR;                       // S = 1 up to here
+          if (full >= 0) { er -= cr[full + 1]; ei -= ci[full + 1]; }
+          for (let i = Math.max(0, full + 1); i <= last; i++) {
+            const sv = ramp(a - cT - i * DT);
+            er -= pr[i] * sv; ei -= pi[i] * sv;
+          }
+        }
+        let rr = er * nr - ei * ni, ri = er * ni + ei * nr;
+        const fade = Math.min(1, Math.max(0, (a - (ARRIVE - SETTLE_BLEND)) / SETTLE_BLEND));
+        const f = fade * fade * (3 - 2 * fade);
+        rr += (1 - rr) * f; ri += (0 - ri) * f;
+        const o = (ia * NQ + iq) * 4 + ch;
+        tab[o] = rr; tab[o + 1] = ri;
+      }
+    }
+  }
+  return tables.map(data => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    nearest(gl.TEXTURE_2D);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, NQ, NA, 0, gl.RGBA, gl.FLOAT, data);
+    if (LINEAR) {
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    }
+    return t;
+  });
 }
 
 function allocate() {
@@ -390,10 +511,12 @@ function allocate() {
   if (Math.max(FX, FY) > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('grid too large');
   R = {
     pair: [target(FX, FY), target(FX, FY)],      // transforms and fitting
+    keep: target(FX, FY),                        // the fitted field, while it is split into strips
     page: target(FX, FY, true),                  // the page (linear sRGB)
     cur: [target(FX, FY, true), target(FX, FY, true)],   // the field in the middle now (conjugated)
     see: target(FX, FY, true),                   // what it looks like (linear sRGB)
-    S: layers(FX, FY, 2 * MAX_SNAP),             // the changes in flight: slot s, part p at 2s + p
+    S: layers(FX, FY, 2 * RANKS * MAX_SNAP),     // the changes in flight: slot s, strip r, part p
+    E: responseTables(),                         // the response of each pattern to a change
   };
   for (const r of R.cur) { gl.bindFramebuffer(gl.FRAMEBUFFER, r.f); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
   snaps = []; fromDark = true; hasCur = false; t = 0;
@@ -498,8 +621,12 @@ function fitDrive(slot, row) {
       });
       a = 1 - a;
     }
-    a = fft(a);
-    run(P.store, R.S.fbos[2 * slot + part], FX, FY, { X: pair[a].t }, u => { gl.uniform2i(u.F, FX, FY); gl.uniform2fv(u.kc, kc); });
+    run(P.copy, R.keep.f, FX, FY, { X: pair[a].t });
+    for (let r = 0; r < RANKS; r++) {
+      run(P.mask, pair[0].f, FX, FY, { X: R.keep.t }, u => { gl.uniform1i(u.r, r); gl.uniform1i(u.ox, OX); gl.uniform1i(u.w, W); });
+      const b = fft(0);
+      run(P.store, R.S.fbos[(slot * RANKS + r) * 2 + part], FX, FY, { X: pair[b].t }, u => { gl.uniform2i(u.F, FX, FY); gl.uniform2fv(u.kc, kc); });
+    }
   }
 }
 
@@ -523,23 +650,21 @@ function changeDrive(now) {
 // Forget changes that have fully arrived (or scrolled too far to keep).
 function prune() {
   const row = rowNow();
-  while (snaps.length > 1 && (t - snaps[1].t0 > ARRIVE || Math.abs(row - snaps[0].row) > room())) dropOldest();
+  while (snaps.length > 1 && (t - snaps[1].t0 > DONE || Math.abs(row - snaps[0].row) > room())) dropOldest();
 }
 
 // The field in the middle now, and what it looks like.
 function render() {
   const row = rowNow();
   const n = snaps.length;
-  const lay = new Int32Array(MAX_SNAP), sh = new Int32Array(MAX_SNAP), age = new Float32Array(MAX_SNAP);
-  snaps.forEach((s, j) => { age[j] = t - s.t0; sh[j] = row - s.row; });
+  const slot = new Int32Array(MAX_SNAP), sh = new Int32Array(MAX_SNAP), age = new Float32Array(MAX_SNAP);
+  snaps.forEach((s, j) => { age[j] = t - s.t0; sh[j] = row - s.row; slot[j] = s.slot; });
   for (let part = 0; part < 2; part++) {
-    snaps.forEach((s, j) => { lay[j] = 2 * s.slot + part; });
-    run(P.combine, R.pair[0].f, FX, FY, { S: [gl.TEXTURE_2D_ARRAY, R.S.t] }, u => {
+    run(P.combine, R.pair[0].f, FX, FY, { S: [gl.TEXTURE_2D_ARRAY, R.S.t], E: R.E[part] }, u => {
       gl.uniform2i(u.F, FX, FY);
-      gl.uniform1i(u.count, n); gl.uniform1i(u.fromDark, fromDark ? 1 : 0);
-      gl.uniform1iv(u.lay, lay); gl.uniform1iv(u.sh, sh); gl.uniform1fv(u.age, age);
+      gl.uniform1i(u.count, n); gl.uniform1i(u.fromDark, fromDark ? 1 : 0); gl.uniform1i(u.part, part);
+      gl.uniform1iv(u.slot, slot); gl.uniform1iv(u.sh, sh); gl.uniform1fv(u.age, age);
       gl.uniform2f(u.k, phys.k[2 * part], phys.k[2 * part + 1] || phys.k[2]);
-      gl.uniform1f(u.ht, HT); gl.uniform1f(u.ramp, RAMP);
     });
     const a = fft(0);
     run(P.copy, R.cur[part].f, FX, FY, { X: R.pair[a].t });
@@ -568,12 +693,12 @@ function draw() {
   });
 }
 
-const settled = () => snaps.length > 0 && t - snaps[snaps.length - 1].t0 > ARRIVE;
+const settled = () => snaps.length > 0 && t - snaps[snaps.length - 1].t0 > DONE;
 function hud() {
-  const x = snaps.length ? Math.min(1, (t - snaps[snaps.length - 1].t0) / ARRIVE) : 0;
+  const x = snaps.length ? Math.min(1, (t - snaps[snaps.length - 1].t0) / DONE) : 0;
   hudText.textContent =
     `colour = what the eye sees of light at ${LAMBDA.join(', ')} nm, run at ${FREQ.map(f => f.toFixed(1)).join(', ')} Hz · ` +
-    `sent in only from the faces of a slab ${DEPTH * 2} wavelengths thick · wavelength at 10 Hz ${Math.round(phys.wl)} px · ` +
+    `sent in only from the faces of a slab ${DEPTH * 2} wavelengths thick, switched from the sides inward · wavelength at 10 Hz ${Math.round(phys.wl)} px · ` +
     `${x >= 1 ? 'standing' : `arriving ${Math.round(100 * x)}%`}`;
 }
 
@@ -597,7 +722,7 @@ function tick(now) {
 
 // Start already standing (reduced motion): everything has arrived.
 function warmUp() {
-  for (const s of snaps) s.t0 = t - ARRIVE - 1;
+  for (const s of snaps) s.t0 = t - DONE - 1;
   prune();
 }
 
@@ -648,7 +773,7 @@ function layout() {
   for (;;) {
     W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
     FX = pow2AtLeast(W + 2 * RING); FY = pow2AtLeast(H + 2 * RING);
-    if (FY - H - RING < H / 4) FY *= 2;                            // room to scroll a change
+    if (FY - H - RING < H / 2) FY *= 2;                            // room to scroll a change
     if (FX * FY <= MAX_TEXELS || d < 0.05) break;
     d *= 0.95;
   }
