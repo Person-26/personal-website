@@ -71,6 +71,14 @@ const RING = 12;           // grid points around the screen left free by the fit
 const RAMP = 0.04;         // s: the ends switch a row's light on over this (8 cycles at 200 Hz):
                            // sharp, so the light arrives as a ringing front, not a fade
 const NODES = 8;           // bands of k / |kx| per end
+const WELL_N = 192;        // samples of the dragged well's path kept ...
+const WELL_DT = 1 / 80;    // s: ... one per this (so 2.4 s of it: longer than light takes to cross)
+const WELL_R0 = 4;         // grid points: the well's core
+const WELL_GAIN = 1;       // the well's charge: how bright its light is per unit of current / c
+const PITCH = 40;          // the well's motion meets the light at this many times its frequency
+const BELL = 0.1;          // s: the window the shaking is measured over (its bell, in frequency,
+                           // 1 / (2 pi BELL) = 1.6 Hz wide: the whole visible range, 3.9-7.2 Hz)
+const BELL_LAG = 2.3 * BELL;   // s: the window's centre, in the past (smooth and causal)
 const LS0 = Math.log(1 / BAND), LS1 = Math.log(1 / GRAZE), DLS = (LS1 - LS0) / (NODES - 1);
 const ND = 64, NA = 1024;  // response table: distances 0..tmax; ages from the light-speed front to settled
 const FS = 100;            // Hz: the response is computed at this many samples per s
@@ -250,13 +258,51 @@ void main() {
 }`;
 
 // What the eye sees: each frequency's intensity, through the colour matching functions, as
-// linear sRGB.
-const FS_SEE = HEAD + `
-uniform sampler2D C0, C1;
+// linear sRGB. First, the dragged well's light. The well, where the pointer is held, is a charge,
+// and moving it is a current, J = q v. A current radiates only at the frequencies it has: shaken
+// at f, the well shines at PITCH f, a wavelength the eye sees as some colour, through the same
+// colour matching functions as everything else (so their overlap is the eye's); that colour is
+// carried by the three frequencies here in the mix that looks the same. Standing still or
+// dragged steadily it has no such frequency, and outside the visible range none the eye sees. Each point gets the light from where the well was when it left
+// (|x - s(t')| = c (t - t'), every root summed: shaken faster than light, there are several), as
+// from an antenna: the part of J across the line to it (strongest sideways to the shaking),
+// falling off as 1/sqrt(r), since the well runs through the guide's depth, a line source.
+const FS_SEE = HEAD + CPLX + `
+uniform sampler2D C0, C1, WT;   // WT: the well's path, newest first: row 0 window x, y (grid
+                                // points), age (s); rows 1-3 per frequency, J (complex x, y)
 uniform mat3 see;
+uniform int nw;
+uniform vec3 kf;                // per frequency: radians per grid point
+uniform float cps;
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
   vec4 a = texelFetch(C0, n, 0), b = texelFetch(C1, n, 0);
+  if (nw > 1) {
+    vec2 x = vec2(n);
+    vec4 p = texelFetch(WT, ivec2(0, 0), 0);
+    float f0 = length(x - p.xy) - cps * p.z;
+    for (int i = 0; i + 1 < ${WELL_N}; i++) {
+      if (i + 1 >= nw) break;
+      vec4 q = texelFetch(WT, ivec2(i + 1, 0), 0);
+      float f1 = length(x - q.xy) - cps * q.z;
+      if (f0 >= 0.0 && f1 < 0.0) {                // the light here left during this step
+        float u = f0 / (f0 - f1);
+        vec2 s = mix(p.xy, q.xy, u);
+        float r = length(x - s);
+        vec2 dir = (x - s) / max(r, 1e-3), side = vec2(-dir.y, dir.x);
+        float g = ${WELL_GAIN.toFixed(2)} / cps * sqrt(${WELL_R0.toFixed(1)} / max(r, ${WELL_R0.toFixed(1)}));
+        vec2 j[3];
+        for (int c = 0; c < 3; c++) {
+          vec4 J = mix(texelFetch(WT, ivec2(i, c + 1), 0), texelFetch(WT, ivec2(i + 1, c + 1), 0), u);
+          j[c] = g * (J.xy * side.x + J.zw * side.y);    // the current across the line to here
+        }
+        a.xy += cmul(j[0], cis(kf.x * r));
+        a.zw += cmul(j[1], cis(kf.y * r));
+        b.xy += cmul(j[2], cis(kf.z * r));
+      }
+      p = q; f0 = f1;
+    }
+  }
   vec3 I = vec3(dot(a.xy, a.xy), dot(a.zw, a.zw), dot(b.xy, b.xy));
   o = vec4(see * I, 0.0);
 }`;
@@ -801,8 +847,125 @@ function render() {
       gl.uniform1fv(u.slow, phys.bands.slow); gl.uniform1fv(u.lead, phys.bands.lead); gl.uniform1fv(u.span, phys.bands.span);
     });
   }
-  run(P.see, R.see.f, WW, HH, { C0: R.cur[0].t, C1: R.cur[1].t }, u => gl.uniformMatrix3fv(u.see, false, SEE_MAT));
+  const nw = wellPath(row);
+  run(P.see, R.see.f, WW, HH, { C0: R.cur[0].t, C1: R.cur[1].t, WT: wellTex }, u => {
+    gl.uniformMatrix3fv(u.see, false, SEE_MAT);
+    gl.uniform1i(u.nw, nw);
+    gl.uniform3f(u.kf, phys.k[0], phys.k[1], phys.k[2]);
+    gl.uniform1f(u.cps, phys.cps);
+  });
 }
+
+// ---------------------------------------------------------------- the well
+// Hold the mouse button down (not on a link or control) and the well follows the pointer; let go
+// and it stays where it was, still, until its last light has left the window. Its path is kept in
+// page CSS px, so it scrolls with the page.
+// The colour of light of wavelength l (nm) as the eye sees it, as intensities of the three
+// frequencies here (the CIE 1931 analytic fit and sRGB matrix, the same that give SEE: the three
+// lines' own colours come out as SEE's columns, scaled by SEE_SCALE). Out of their gamut (between
+// two lines, the spectrum is more saturated than any mix of them) the nearest mix: negatives clipped.
+const lobe = (l, m, s1, s2) => Math.exp(-0.5 * ((l - m) / (l < m ? s1 : s2)) ** 2);
+const XYZ_RGB = [[3.2406, -1.5372, -0.4986], [-0.9689, 1.8758, 0.0415], [0.0557, -0.2040, 1.0570]];
+const SEE_SCALE = 0.7745;
+const SEE_INV = (() => {
+  const [[a, b, c], [d, e, f], [g, h, i]] = SEE;
+  const A = e * i - f * h, B = f * g - d * i, C = d * h - e * g, det = a * A + b * B + c * C;
+  return [[A, c * h - b * i, b * f - c * e], [B, a * i - c * g, c * d - a * f], [C, b * g - a * h, a * e - b * d]].map(r => r.map(v => v / det));
+})();
+function lineMix(l) {
+  if (l < 360 || l > 830) return [0, 0, 0];
+  const X = 1.056 * lobe(l, 599.8, 37.9, 31.0) + 0.362 * lobe(l, 442.0, 16.0, 26.7) - 0.065 * lobe(l, 501.1, 20.4, 26.2);
+  const Y = 0.821 * lobe(l, 568.8, 46.9, 40.5) + 0.286 * lobe(l, 530.9, 16.3, 31.1);
+  const Z = 1.217 * lobe(l, 437.0, 11.8, 36.0) + 0.681 * lobe(l, 459.0, 26.0, 13.8);
+  const rgb = XYZ_RGB.map(r => SEE_SCALE * (r[0] * X + r[1] * Y + r[2] * Z));
+  return SEE_INV.map(r => Math.max(0, r[0] * rgb[0] + r[1] * rgb[1] + r[2] * rgb[2]));
+}
+const OMEGA_MID = 2 * Math.PI * F_REF / PITCH;          // rad/s: shaking that meets mid-visible (550 nm)
+const BELL_SUM = BELL * Math.sqrt(2 * Math.PI);         // the window's area
+const wellTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, wellTex);
+nearest(gl.TEXTURE_2D);
+const wellBuf = new Float32Array(WELL_N * 4 * 4);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, WELL_N, 4, 0, gl.RGBA, gl.FLOAT, wellBuf);
+let held = null;                 // where the pointer holds the well, page CSS px (null: let go)
+let wellPos = null;              // where the well is (it stays when let go; null: none)
+let motion = [];                 // its recent positions, newest first: { x, y, t: real s, from the pointer's events }
+let wellPts = [];                // its path, newest first: { x, y, t, J: per frequency [re x, im x, re y, im y] }
+// The current now, per frequency here. J = q v, demodulated around mid-visible through the window
+// (a complex amplitude: a steady shaking of velocity amplitude V gives V); its frequency from how
+// fast its phase turns; its colour from the wavelength that frequency makes. Measured in real
+// time from the pointer's own events (not frames, which may be too few or too slow).
+function demodAt(now, pts) {
+  const z = [0, 0, 0, 0];
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const p = pts[i], q = pts[i + 1], dt = p.t - q.t;
+    if (dt <= 0 || q.t > now) continue;
+    const vx = (p.x - q.x) / dt, vy = (p.y - q.y) / dt, s = (p.t + q.t) / 2;
+    const w = Math.exp(-((now - s - BELL_LAG) ** 2) / (2 * BELL * BELL)) * dt * 2 / BELL_SUM;
+    const c = Math.cos(OMEGA_MID * s) * w, sn = Math.sin(OMEGA_MID * s) * w;
+    z[0] += vx * c; z[1] += vx * sn; z[2] += vy * c; z[3] += vy * sn;
+  }
+  return z;
+}
+const TURN = 0.02;               // s: the frequency from the phase's turn over this
+function current(now, at) {
+  const pts = [{ x: at.x, y: at.y, t: now }, ...motion];
+  const z = demodAt(now, pts), [a, b, c, e] = demodAt(now - TURN, pts);
+  const mag = Math.hypot(...z);
+  if (!(mag > 0)) return [0, 1, 2].map(() => [0, 0, 0, 0]);
+  const re = a * z[0] + b * z[1] + c * z[2] + e * z[3], im = a * z[1] - b * z[0] + c * z[3] - e * z[2];
+  const omega = OMEGA_MID - Math.atan2(im, re) / TURN;      // z turns at -(omega - OMEGA_MID)
+  const nm = LAMBDA_REF * F_REF / (PITCH * omega / (2 * Math.PI));
+  const bell = Math.exp(-(((omega - OMEGA_MID) * BELL) ** 2) / 2);   // the window's response there
+  const amp = mag / Math.max(bell, 0.2);
+  return lineMix(nm).map(I => z.map(v => v / mag * amp * Math.sqrt(I)));
+}
+const strength = J => Math.max(...J.map(j => Math.hypot(...j)));
+// Bring the well's path up to now and into the texture; the number of path points to use.
+function wellPath(row) {
+  if (!wellPos) return 0;
+  const at = held || wellPos, now = performance.now() / 1000;
+  motion = motion.filter(p => now - p.t <= 2 * BELL_LAG + 0.05);
+  const J = current(now, at);
+  const reach = Math.hypot(WW, HH) / phys.cps + 0.2;
+  if (!wellPts.length || t - wellPts[0].t >= WELL_DT || t < wellPts[0].t) wellPts.unshift({ x: at.x, y: at.y, t, J });
+  wellPts = wellPts.filter(p => p.t <= t && t - p.t < reach).slice(0, WELL_N - 1);
+  const quiet = 1e-3 * phys.wl * F_REF;          // a current too weak to see (CSS px/s)
+  const lit = wellPts.some(p => strength(p.J) > quiet) || strength(J) > quiet;
+  if (!lit) {
+    if (!held && !motion.length) { wellPos = null; wellPts = []; }
+    return 0;
+  }
+  const pts = [{ x: at.x, y: at.y, t, J }, ...wellPts];
+  pts.forEach((p, i) => {
+    wellBuf.set([p.x * d + RING - 0.5, p.y * d - row + RING - 0.5, t - p.t, 0], i * 4);
+    for (let f = 0; f < 3; f++) wellBuf.set(p.J[f].map(v => v * d), ((f + 1) * WELL_N + i) * 4);   // grid points / s
+  });
+  gl.bindTexture(gl.TEXTURE_2D, wellTex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, WELL_N, 4, gl.RGBA, gl.FLOAT, wellBuf);
+  return pts.length;
+}
+addEventListener('pointerdown', e => {
+  if (!R || e.button !== 0 || e.pointerType === 'touch' || e.target.closest('a, button, input, label, select, textarea')) return;
+  e.preventDefault();                            // a drag here moves the well, not a text selection
+  held = wellPos = { x: e.clientX, y: e.clientY + scrollY };
+  motion.unshift({ ...held, t: e.timeStamp / 1000 });
+  loop();
+});
+addEventListener('pointermove', e => {
+  if (!held) return;
+  const all = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+  for (const c of all.length ? all : [e]) {
+    const p = { x: c.clientX, y: c.clientY + scrollY, t: c.timeStamp / 1000 };
+    if (!motion.length || p.t > motion[0].t) motion.unshift(p);
+  }
+  held = wellPos = { x: e.clientX, y: e.clientY + scrollY };
+  loop();
+});
+const letGo = () => { held = null; };            // it stays where it was let go
+addEventListener('pointerup', letGo);
+addEventListener('pointercancel', letGo);
+addEventListener('blur', letGo);
 
 function hex(v) {
   const m = /#([0-9a-f]{6})/i.exec(v) || ['', '000000'];
@@ -855,7 +1018,7 @@ function tick(now) {
   draw();
   const x = arrived();
   hud(x);
-  const more = moved || job || x < 1;
+  const more = moved || job || x < 1 || wellPos !== null;
   lastFrame = more ? now : 0;
   if (more) loop();
 }
@@ -866,15 +1029,6 @@ function warmUp() {
 }
 
 addEventListener('scroll', () => { if (R) { moved = true; loop(); } }, { passive: true });
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-  if (!R) return;
-  readColors();
-  prepareFigures().then(() => {
-    if (!R) return;
-    changeDrive(performance.now(), true);   // a new palette is a new page
-    loop();
-  });
-});
 
 // ---------------------------------------------------------------- smooth scrolling
 // Wheel steps ease toward their target instead of jumping, so the drives change gradually.

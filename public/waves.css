@@ -1,13 +1,11 @@
+/* Always dark: light added to a dark page shows in its own colour (on a white one it clips). */
 :root {
-  --bg: #f5f4ef;
-  --fg: #12141a;
-  --neg: #1f6fd8;
-  --muted: #676b73;
+  --bg: #06080c;
+  --fg: #eef2f7;
+  --neg: #3a8dff;
+  --muted: #9aa1ab;
   --fs: clamp(17px, 0.8rem + 0.55vw, 24px);
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #06080c; --fg: #eef2f7; --neg: #3a8dff; --muted: #9aa1ab; color-scheme: dark; }
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
