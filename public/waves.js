@@ -1,52 +1,51 @@
-// The page as light: the mid-plane z = 0 of a slab of a scalar wave field, seen the way an eye
-// sees light. The only inputs are boundary conditions, on the slab's two faces.
+// The page as light: the middle plane z = 0 of a deep waveguide filled with a scalar wave field,
+// seen the way an eye sees light. The only inputs are boundary conditions, at the guide's left
+// and right ends.
 //
 // The field is three waves, at the frequencies of visible light at 460 nm (blue), 540 nm (green)
-// and 620 nm (red), scaled down so that 550 nm would be 10 Hz: 12.0, 10.2 and 8.9 Hz. Three are
+// and 620 nm (red), scaled down so that 550 nm would be 200 Hz: 239, 204 and 177 Hz. Three are
 // enough: the eye has three kinds of colour receptor, so three spectral lines can match any colour
 // on the page, as a laser projector does. Each pixel's colour is what those frequencies look like
-// together: the intensity of each on the mid-plane, weighted by the eye's colour matching
+// together: the intensity of each on the middle plane, weighted by the eye's colour matching
 // functions (CIE 1931, analytic fit) and turned into sRGB. Nothing else sets a colour.
 //
-// The slab: x, y across the screen (periodic, much wider than the screen's text), z from -h to h,
-// h = DEPTH wavelengths. Everywhere inside, the wave equation u_tt = c^2 lap u, the same c for
-// every frequency (set by the knob: the wavelength at 10 Hz in CSS px). On each face the boundary
-// condition sends in a prescribed wave and lets whatever arrives leave (an open face with an
-// incoming wave). Both faces send the same wave, so the field is mirror-symmetric about z = 0.
+// The guide: x across the screen, between two open ends just beyond the screen's left and right
+// edges; y along the page (uniform); z deep (uniform, mirror-symmetric about the screen). Inside,
+// the wave equation u_tt = c^2 lap u, the same c for every frequency (set by the knob: the
+// wavelength at 200 Hz in CSS px). Each end sends in a prescribed wave and lets whatever arrives
+// leave. Nothing else is driven: the screen is lit only by light that has come in from the ends.
 //
-// The slab is uniform, so it is solved exactly, one in-plane pattern q at a time, with FFTs instead
-// of time steps. Pattern q at frequency w crosses the slab as a plane wave tilted by sin(theta) =
-// |q| / k (k = w / c), if |q| < k; finer patterns die out within a wavelength of the face and
-// never reach the middle (so the page can only be held to about half a wavelength). For each
-// pattern the crossing is a 1D Klein-Gordon problem in z (u_tt = c^2 u_zz - c^2 q^2 u), whose
-// response to a wave switched on at a face is known exactly (the signalling solution): nothing
-// until h / c, then a ringing front that settles to the steady state. That response, E(|q|, age),
-// is tabulated once per layout. In space, it is every point of the faces sending out a spherical
-// wavelet: on the screen each change first appears straight across from where it was sent,
-// then spreads out in rings, and the rings from everywhere interfere into the page.
+// The guide is uniform in y and z, so its light is a sum of modes e^{i(kx x + ky y)} cos(kz z),
+// each crossing in x at its own sideways wavenumber kx = sqrt(k^2 - ky^2 - kz^2): the left end
+// sends those with kx > 0, the right end those with kx < 0. On the middle plane they add up to any
+// pattern with |q| < k, so the ends can hold the page there (to about half a wavelength), as long
+// as the light also moves sideways: light with |kx| near 0 runs almost along y or z and takes
+// forever to get in from the ends, so the page is fitted without it (|kx| > GRAZE k).
 //
-// A face switched everywhere at once sends its change straight across: the tilted waves' sideways
-// parts cancel, and the change appears on the whole screen together, as a fade. Two things in the
-// drive make the waves show instead, both still only what the faces send:
-//  - The light is slanted. The fit starts from (and keeps) a phase that tilts the light carrying
-//    the left half of the page rightward and the right half leftward (sin = TILT). Tilt is only
-//    phase, so the standing page is unchanged, but that light travels sideways as it crosses.
-//  - A change is sent out of focus first. The faces send it focused DEFOCUS wavelengths from the
-//    screen (a phase (kz - k) x distance on each pattern), then pull the focus onto the screen
-//    over FOCUS s. Out of focus, the page is its own diffraction pattern: fringes and rings
-//    round every edge, and, the light being slanted, each half displaced toward its own side.
-//    As the focus comes in, the two halves travel in from left and right and the rings close
-//    into the text.
-// The response to that moving focus is exact too: the same signalling solution, with the
-// drive's changing phase inside the integral (so a fast-moving focus shifts each pattern's
-// frequency, as it must), tabulated once.
+// The fit: for each frequency, the field on the middle plane whose amplitude is the page's, with
+// its phase free (Gerchberg-Saxton, with FFTs), seeded with light slanted toward the middle (sin =
+// TILT): the left half of the page carried mostly from the left end, the right half from the
+// right. What each end sends follows from that field mode by mode.
+//
+// Arrival, exactly: for each mode, the crossing from an end is a 1D Klein-Gordon problem in x
+// (u_tt = c^2 u_xx - c^2 (k^2 - kx^2) u), whose response to a wave switched on at the end is known
+// (computed here through its spectrum): nothing until the light-speed front, then the wave arriving
+// at its group velocity c |kx| / k, dispersed. It depends only on |kx| / k and the distance from
+// the end. So the light is split by |kx| / k (NODES smooth bands per end, on a log scale of
+// k / |kx|) and each band is stored as an image; each frame, each band is weighted by its
+// response at each point's distance from its end, and they add up to the field now.
+//
+// The page changes when it loads and while it scrolls. The field moves with the page; the ends are
+// refitted as it scrolls (each refit keeps the light already there and fits only what is new),
+// and each row of the page is lit from the moment it first came into view: light from the ends
+// has been arriving there since. Light that scrolls off the screen is gone.
 (() => {
 'use strict';
 
-const WAVELENGTH = 5;      // CSS px: the wavelength at 10 Hz (?wavelength= overrides): the knob
-// The frequencies: visible light at these wavelengths (nm), scaled so that 550 nm is 10 Hz.
+const WAVELENGTH = 5;      // CSS px: the wavelength at 200 Hz (?wavelength= overrides): the knob
+// The frequencies: visible light at these wavelengths (nm), scaled so that 550 nm is 200 Hz.
 const LAMBDA = [460, 540, 620];
-const F_REF = 10, LAMBDA_REF = 550;
+const F_REF = 200, LAMBDA_REF = 550;
 const FREQ = LAMBDA.map(l => F_REF * LAMBDA_REF / l);
 // Linear sRGB of unit intensity at each frequency (CIE 1931 analytic fit, scaled so all three at
 // unit intensity have unit green), and a non-negative mix of frequencies for each sRGB channel
@@ -57,28 +56,23 @@ const SEE = [
   [1.37121, -0.12184, -0.02223],
 ];
 const MIX = [[0.01429, 0.08145, 0.73388], [0.05097, 0.87585, 0.04892], [0.60214, 0.22381, 0.01526], [0, 0, 0]];
-const DEPTH = 4;           // the slab's half-thickness h, in wavelengths at 10 Hz
 const PPW = 2.5;           // grid points per wavelength of the finest (blue) light
 const MAX_TEXELS = 1 << 20;   // grid points at most (else the wavelength is made longer)
 const BAND = 0.9;          // patterns fitted up to this fraction of each frequency's wavenumber
 const TAPER = 0.75;        // ... rolling off smoothly from this fraction of that
-const GS_ITERS = 6;        // phase-fit rounds per page change
-const RING = 12;           // grid points around the screen left free by the fit
-const RAMP = 0.25;         // s: the faces fade over to a new drive over this
-const DEFOCUS = -150;      // wavelengths at 10 Hz: a change is first sent focused this far from the screen
-                           // (negative: beyond it, so slanted light starts on its own side) ...
-const FOCUS = 3;           // s: ... and the faces pull the focus onto the screen over this
-const TILT = 0.25;         // sin of the slant of the light carrying each half of the page, toward the middle
-const MAX_SNAP = 4;        // page changes kept in flight at most
-const RANKS = 1;           // strips from the edges to the middle, each switched at its own time (1: all at once)
-const SWEEP = 0;           // s: from the edges' switch to the middle's
-const STEP_GAP = 220;      // ms: at most one drive change per this interval while scrolling
-const IDLE = 120;          // ms: the faces change once the page has stopped scrolling this long
-const HT = DEPTH / F_REF;  // s: the head-on crossing time h / c
-const ARRIVE = HT + FOCUS + 2;   // s: the response is tabulated up to this age ...
-const SETTLE_BLEND = 1;    // s: ... its last slow ringing faded out over this, before the end
-const NQ = 128, NA = 512;  // table size: pattern sizes 0..k; ages 0..ARRIVE
-const DONE = SWEEP + ARRIVE;   // s: until a change has fully arrived everywhere
+const GRAZE = 0.1;         // no light with |kx| below this fraction of k ...
+const GRAZE_FULL = 0.22;   // ... full light above this
+const TILT = 0.3;          // sin of the slant toward the middle the fit starts from
+const GS_ITERS = 8;        // phase-fit rounds for a new page ...
+const GS_ITERS_SCROLL = 3; // ... and for a scrolled one (most of it kept)
+const STEPS = 2;           // steps of a scrolled fit per frame (it is spread over frames)
+const RING = 12;           // grid points around the screen left free by the fit; the ends sit at its edge
+const RAMP = 0.5;          // s: the ends switch a row's light on over this
+const NODES = 8;           // bands of k / |kx| per end
+const LS0 = Math.log(1 / BAND), LS1 = Math.log(1 / GRAZE), DLS = (LS1 - LS0) / (NODES - 1);
+const ND = 128, NA = 512;  // response table: distances 0..tmax; ages 0..amax
+const SETTLE_BLEND = 3;    // s: the response's last slow tail faded out over this, before amax
+const STEP_GAP = 100;      // ms: start a refit at most this often while scrolling
 
 const root = document.documentElement;
 const canvas = document.getElementById('field');
@@ -98,24 +92,26 @@ if (!gl || !gl.getExtension('EXT_color_buffer_float')) return;   // the plain HT
 const LINEAR = !!gl.getExtension('OES_texture_float_linear');     // filtered table lookups
 
 // ---------------------------------------------------------------- shaders
-// The grid (F.x x F.y, powers of two, periodic) holds the screen at off and a free ring around it.
-// Spectra hold two complex numbers per texel: frequencies 2p and 2p + 1 of part p (the fourth is
-// spare).
+// The grid (F.x x F.y, powers of two, periodic) holds the screen at (OX, OY) and a free ring
+// around it; the window is the screen and its ring. Fields and spectra hold two complex numbers
+// per texel: frequencies 2p and 2p + 1 of part p (the fourth is spare).
 const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\nout vec4 o;\n';
 const VS = '#version 300 es\nin vec2 p;\nvoid main(){ gl_Position = vec4(p, 0.0, 1.0); }';
 const CPLX = `
 vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 vec2 cis(float a) { return vec2(cos(a), sin(a)); }`;
-// |q| (radians per grid point) of spectral index n, and the band limit for the part's two
-// frequencies.
+// The wave vector (radians per grid point) of spectral index n, and the light the ends can
+// deliver: crossing patterns (|q| < BAND k, tapered) that also move sideways (|kx| > GRAZE k).
 const Q = `
 uniform ivec2 F;
-float qlen(ivec2 n) {
-  return length(6.28318531 * vec2(n.x < F.x / 2 ? n.x : n.x - F.x, n.y < F.y / 2 ? n.y : n.y - F.y) / vec2(F));
+vec2 wave(ivec2 n) {
+  return 6.28318531 * vec2(n.x < F.x / 2 ? n.x : n.x - F.x, n.y < F.y / 2 ? n.y : n.y - F.y) / vec2(F);
 }
-vec2 taper(float q, vec2 kc) {
-  vec2 t = clamp((q / kc - ${TAPER}) / (1.0 - ${TAPER}), 0.0, 1.0);
-  return 0.5 + 0.5 * cos(3.14159265 * t);
+vec2 band(ivec2 n, vec2 k) {
+  vec2 v = wave(n);
+  vec2 t = clamp((length(v) / (${BAND} * k) - ${TAPER}) / (1.0 - ${TAPER}), 0.0, 1.0);
+  vec2 g = clamp((abs(v.x) / k - ${GRAZE}) / ${(GRAZE_FULL - GRAZE).toFixed(4)}, 0.0, 1.0);
+  return (0.5 + 0.5 * cos(3.14159265 * t)) * (0.5 - 0.5 * cos(3.14159265 * g));
 }`;
 
 // One radix-2 Stockham pass on two complex numbers per texel.
@@ -134,49 +130,41 @@ void main() {
   o = e + vec4(cmul(w, q.xy), cmul(w, q.zw));
 }`;
 
+
 // Start of the fit: each frequency's target amplitude (square root of its share of the page's
-// light) with the phase the field has now, where it is already showing it.
+// light), with the phase of light slanted toward the middle; rows kept from the last fit start
+// (and stay) as they were.
 const FS_GS_INIT = HEAD + CPLX + `
-uniform sampler2D T, C;        // the page (linear sRGB); the field now (conjugated), made at cs rows ago
-uniform int cs, hasC;
-uniform ivec2 F;
+uniform sampler2D T, C;        // the page (linear sRGB); the last fit, made cs rows ago
+uniform int cs;
+uniform ivec2 lit;             // rows [lit.x, lit.y) keep the last fit
 uniform vec3 share[2];         // this part's two rows of MIX
 uniform vec2 k;                // this part's two wavenumbers, radians per grid point
 uniform float xc;              // the screen's middle column
-// The phase to start from: the field's own where it already has about the right strength (it
-// is showing this page); elsewhere that of light slanted toward the middle, from the left on
-// the left half and from the right on the right.
-vec2 seed(vec2 z, float a, float tilt) {
-  float m = length(z);
-  float trust = m > 1e-6 ? 1.0 - smoothstep(0.08, 0.25, abs(m - a)) : 0.0;
-  vec2 u = trust * (m > 1e-6 ? z / m : vec2(1.0, 0.0)) + (1.0 - trust + 1e-4) * cis(tilt);
-  float l = length(u);
-  return l > 1e-6 ? u / l : cis(tilt);
-}
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
+  if (n.y >= lit.x && n.y < lit.y) { o = texelFetch(C, ivec2(n.x, n.y + cs), 0); return; }
   vec3 t = texelFetch(T, n, 0).rgb;
   float a0 = sqrt(max(dot(share[0], t), 0.0)), a1 = sqrt(max(dot(share[1], t), 0.0));
-  vec4 c = vec4(0.0);
-  int y = n.y + cs;
-  if (hasC == 1 && y >= 0 && y < F.y) c = texelFetch(C, ivec2(n.x, y), 0);
   vec2 tilt = -${TILT} * k * abs(float(n.x) + 0.5 - xc);
-  o = vec4(a0 * seed(vec2(c.x, -c.y), a0, tilt.x), a1 * seed(vec2(c.z, -c.w), a1, tilt.y));
+  o = vec4(a0 * cis(tilt.x), a1 * cis(tilt.y));
 }`;
-// Keep only the patterns that can cross, conjugated and scaled for the inverse transform.
+// Keep only the light the ends can deliver, conjugated and scaled for the inverse transform.
 const FS_GS_BAND = HEAD + Q + `
 uniform sampler2D X;
-uniform vec2 kc;
+uniform vec2 k;
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  vec2 w = taper(qlen(n), kc) / float(F.x * F.y);
+  vec2 w = band(n, k) / float(F.x * F.y);
   vec4 x = texelFetch(X, n, 0) * vec4(w.x, w.x, w.y, w.y);
   o = vec4(x.x, -x.y, x.z, -x.w);
 }`;
-// Keep that field's phase; put the target amplitude back on the screen, leave the ring free and
-// keep the rest dark.
+// Keep that field's phase; put the target amplitude back on the screen (the kept rows as they
+// were), leave the ring free and keep the rest dark.
 const FS_GS_PHASE = HEAD + `
-uniform sampler2D Y, T;
+uniform sampler2D Y, T, C;
+uniform int cs;
+uniform ivec2 lit;
 uniform vec3 share[2];
 uniform ivec4 win;             // the screen: x, y, w, h
 uniform int ring;
@@ -189,85 +177,73 @@ void main() {
   int out_ = max(r.x, r.y);
   if (out_ > ring) { o = vec4(0.0); return; }
   if (out_ > 0) { o = vec4(z0, z1); return; }
+  if (n.y >= lit.x && n.y < lit.y) { o = texelFetch(C, ivec2(n.x, n.y + cs), 0); return; }
   vec3 t = texelFetch(T, n, 0).rgb;
   float a0 = sqrt(max(dot(share[0], t), 0.0)), a1 = sqrt(max(dot(share[1], t), 0.0));
   o = vec4(a0 * unit(z0), a1 * unit(z1));
 }`;
-// The fitted field's spectrum, band-limited and normalised: what the faces deliver to the middle.
-const FS_STORE = HEAD + Q + `
+// One band of the fitted light, half transformed (x still spectral): the light from end `side`
+// (0 left: kx > 0; 1 right) in band `node` of log(k / |kx|) (smooth hats that add up to one).
+// Conjugated for the inverse transform.
+const FS_HAT = HEAD + Q + `
 uniform sampler2D X;
-uniform vec2 kc;
+uniform vec2 k;
+uniform int side, node;
+float hat(float kx, float k) {
+  if (side == 0 ? kx <= 0.0 : kx >= 0.0) return 0.0;
+  float ls = clamp(log(k / abs(kx)), ${LS0.toFixed(6)}, ${LS1.toFixed(6)});
+  return max(0.0, 1.0 - abs(ls - ${LS0.toFixed(6)} - float(node) * ${DLS.toFixed(6)}) / ${DLS.toFixed(6)});
+}
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  vec2 w = taper(qlen(n), kc) / float(F.x * F.y);
-  o = texelFetch(X, n, 0) * vec4(w.x, w.x, w.y, w.y);
+  float kx = wave(n).x;
+  vec4 x = texelFetch(X, n, 0) * vec4(vec2(hat(kx, k.x)), vec2(hat(kx, k.y)));
+  o = vec4(x.x, -x.y, x.z, -x.w);
+}`;
+// A region of a (conjugated) transform, conjugated back.
+const FS_TAKE = HEAD + `
+uniform sampler2D X;
+uniform ivec2 org;
+void main() {
+  vec4 x = texelFetch(X, ivec2(gl_FragCoord.xy) + org, 0);
+  o = vec4(x.x, -x.y, x.z, -x.w);
 }`;
 
-// The middle now, pattern by pattern: each kept change times the response to it so far (less
-// the response to the next change, which replaces it), shifted to where the page is now.
-// Conjugated for the inverse transform.
-const FS_COMBINE = HEAD + CPLX + Q + `
-uniform sampler2DArray S;
-uniform sampler2D E;           // the response E(|q| / k, age), the part's two frequencies
-uniform int count, fromDark, part;
-uniform int slot[${MAX_SNAP}], sh[${MAX_SNAP}];
-uniform float age[${MAX_SNAP}];
-uniform vec2 k;                // the part's two wavenumbers, radians per grid point
-vec4 at(vec2 qk, float a) {    // the table, bilinear
-  float y = a / ${ARRIVE.toFixed(3)} * ${NA - 1}.0;
-  vec2 x = clamp(qk, 0.0, 1.0) * ${NQ - 1}.0;
+// The field now, on the window: every band of light from each end, weighted by its response at
+// that point's distance from the end and the age of the light in that row of the page.
+const FS_COMBINE = HEAD + CPLX + `
+uniform sampler2DArray L;      // the bands: layer (part * 2 + side) * NODES + node; row: page row mod hh
+uniform sampler2D E, A;        // the response (this part's two frequencies); each row's age
+uniform int part, base, hh, ww;   // the bands' slot for the window's first row; window size
+uniform float cps, tmax, amax; // light speed (grid points per s); the table's ranges
+vec4 at(int b, float T, float a) {   // the table, bilinear
+  float x = clamp(T / tmax, 0.0, 1.0) * ${ND - 1}.0, y = a / amax * ${NA - 1}.0;
   ${LINEAR ? `
-  vec2 r = texture(E, vec2((x.x + 0.5) / ${NQ}.0, (y + 0.5) / ${NA}.0)).xy;
-  vec2 g = texture(E, vec2((x.y + 0.5) / ${NQ}.0, (y + 0.5) / ${NA}.0)).zw;
-  return vec4(r, g);` : `
-  int y0 = int(floor(y)); float fy = y - float(y0);
-  ivec2 x0 = ivec2(floor(x)); vec2 fx = x - vec2(x0);
-  ivec2 x1 = min(x0 + 1, ${NQ - 1}); int y1 = min(y0 + 1, ${NA - 1});
-  vec4 r0 = mix(texelFetch(E, ivec2(x0.x, y0), 0), texelFetch(E, ivec2(x1.x, y0), 0), fx.x);
-  vec4 r1 = mix(texelFetch(E, ivec2(x0.x, y1), 0), texelFetch(E, ivec2(x1.x, y1), 0), fx.x);
-  vec4 g0 = mix(texelFetch(E, ivec2(x0.y, y0), 0), texelFetch(E, ivec2(x1.y, y0), 0), fx.y);
-  vec4 g1 = mix(texelFetch(E, ivec2(x0.y, y1), 0), texelFetch(E, ivec2(x1.y, y1), 0), fx.y);
-  return vec4(mix(r0, r1, fy).xy, mix(g0, g1, fy).zw);`}
-}
-vec4 resp(vec2 qk, float a) {  // 0 before the front, 1 once settled
-  if (a >= ${ARRIVE.toFixed(3)}) return vec4(1.0, 0.0, 1.0, 0.0);
-  if (a <= ${HT.toFixed(3)}) return vec4(0.0);
-  return at(qk, a);
+  return texture(E, vec2((float(${ND} * b) + x + 0.5) / ${NODES * ND}.0, (y + 0.5) / ${NA}.0));` : `
+  int x0 = int(floor(x)), y0 = int(floor(y)); float fx = x - float(x0), fy = y - float(y0);
+  int x1 = min(x0 + 1, ${ND - 1}), y1 = min(y0 + 1, ${NA - 1});
+  x0 += ${ND} * b; x1 += ${ND} * b;
+  return mix(mix(texelFetch(E, ivec2(x0, y0), 0), texelFetch(E, ivec2(x1, y0), 0), fx),
+             mix(texelFetch(E, ivec2(x0, y1), 0), texelFetch(E, ivec2(x1, y1), 0), fx), fy);`}
 }
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  vec2 qk = qlen(n) / k;
+  int ys = (base + n.y) % hh;
+  float a = texelFetch(A, ivec2(n.y, 0), 0).r;
+  if (a < 0.0) { o = vec4(0.0); return; }
+  bool done = a >= amax;
   vec4 sum = vec4(0.0);
-  for (int j = 0; j < ${MAX_SNAP}; j++) {
-    if (j >= count) break;
-    int m = ((n.y * sh[j]) % F.y + F.y) % F.y;
-    vec2 e = cis(6.28318531 * float(m) / float(F.y));
-    for (int r = 0; r < ${RANKS}; r++) {
-      float delay = ${RANKS > 1 ? `${SWEEP.toFixed(3)} * float(r) / ${RANKS - 1}.0` : '0.0'};
-      vec4 w = j == 0 && fromDark == 0 ? vec4(1.0, 0.0, 1.0, 0.0) : resp(qk, age[j] - delay);
-      if (j + 1 < count) w -= resp(qk, age[j + 1] - delay);
-      if (w == vec4(0.0)) continue;
-      vec4 d = texelFetch(S, ivec3(n, (slot[j] * ${RANKS} + r) * 2 + part), 0);
-      sum += vec4(cmul(w.xy, cmul(d.xy, e)), cmul(w.zw, cmul(d.zw, e)));
+  for (int s = 0; s < 2; s++) {
+    float T = (s == 0 ? float(n.x) + 0.5 : float(ww - n.x) - 0.5) / cps;
+    for (int b = 0; b < ${NODES}; b++) {
+      vec4 f = texelFetch(L, ivec3(n.x, ys, (part * 2 + s) * ${NODES} + b), 0);
+      if (done) { sum += f; continue; }
+      vec4 e = at(b, T, a);
+      sum += vec4(cmul(e.xy, f.xy), cmul(e.zw, f.zw));
     }
   }
-  o = vec4(sum.x, -sum.y, sum.z, -sum.w);
+  o = sum;
 }`;
-// One strip of the fitted field: by distance from the screen's left and right edges (0 at the
-// edges, RANKS at the middle), soft hats that add up to one.
-const FS_MASK = HEAD + `
-uniform sampler2D X;
-uniform int r, ox, w;
-void main() {
-  ivec2 n = ivec2(gl_FragCoord.xy);
-  float x = float(n.x - ox) + 0.5;
-  float d = min(x, float(w) - x) / (0.5 * float(w)) * ${RANKS}.0 - 0.5;
-  float m = max(0.0, 1.0 - abs(clamp(d, 0.0, ${RANKS - 1}.0) - float(r)));
-  o = texelFetch(X, n, 0) * m;
-}`;
-const FS_COPY = HEAD + `
-uniform sampler2D X;
-void main() { o = texelFetch(X, ivec2(gl_FragCoord.xy), 0); }`;
 
 // What the eye sees: each frequency's intensity, through the colour matching functions, as
 // linear sRGB.
@@ -341,7 +317,7 @@ try {
   };
   P = {
     fft: program(FS_FFT), gsInit: program(FS_GS_INIT), gsBand: program(FS_GS_BAND), gsPhase: program(FS_GS_PHASE),
-    store: program(FS_STORE), combine: program(FS_COMBINE), copy: program(FS_COPY), mask: program(FS_MASK),
+    hat: program(FS_HAT), take: program(FS_TAKE), combine: program(FS_COMBINE),
     see: program(FS_SEE), disp: program(FS_DISPLAY),
   };
 } catch (e) {
@@ -400,10 +376,11 @@ function layers(w, h, n, full) {
   }
   throw new Error('no float layer target');
 }
-function run(prog, fbo, w, h, tex, set) {
+// Draw with `prog` into fbo (w x h), or only into its rows [y0, y0 + rows).
+function run(prog, fbo, w, h, tex, set, y0 = 0, rows = h) {
   gl.useProgram(prog.p);
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-  gl.viewport(0, 0, w, h);
+  gl.viewport(0, y0, w, rows);
   let unit = 0;
   for (const k in tex) {
     gl.activeTexture(gl.TEXTURE0 + unit);
@@ -415,136 +392,146 @@ function run(prog, fbo, w, h, tex, set) {
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
-
-
 // ---------------------------------------------------------------- state
 let Lx = 0, Ly = 0;            // CSS px
 let W = 0, H = 0, FX = 0, FY = 0, OX = 0, OY = 0;   // grid points: screen; grid; screen offset
+let WW = 0, HH = 0;            // the window: the screen and its ring
 let d = 1;                     // grid points per CSS px
 let wavelength = WAVELENGTH;
-const phys = { wl: 0, k: [0, 0, 0, 0] };
+const phys = { wl: 0, k: [0, 0, 0, 0], cps: 1, tmax: 1, amax: 1 };
 let R = null;
 let t = 0;                     // s of time
-let snaps = [];                // page changes in flight, oldest first: { slot, t0, row }
-let fromDark = true;           // the oldest change came in over darkness
-let curRow = 0, hasCur = false;   // the grid row the field now (R.cur) was made at
-let raf = 0, moved = false, lastStep = -1e9, lastScroll = -1e9, colors = null;
+let fitRow = 0, hasFit = false;   // the page row the last fit was made at
+let lit = null, LIT0 = 0;      // per page row (offset LIT0): the time its light was switched on, or NaN
+let ageBuf = null;
+let raf = 0, moved = false, lastStep = -1e9, colors = null;
 const SEE_MAT = new Float32Array([SEE[0][0], SEE[1][0], SEE[2][0], SEE[0][1], SEE[1][1], SEE[2][1], SEE[0][2], SEE[1][2], SEE[2][2]]);
 const pow2AtLeast = n => 1 << Math.ceil(Math.log2(Math.max(2, n)));
 
 function freeResources() {
   if (!R) return;
-  for (const r of [...R.pair, R.keep, R.page, ...R.cur, R.see]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
-  gl.deleteTexture(R.S.t); R.S.fbos.forEach(f => gl.deleteFramebuffer(f));
+  for (const r of [...R.pair, R.mix, R.page, ...R.fit, ...R.cur, R.see]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
+  gl.deleteTexture(R.L.t); R.L.fbos.forEach(f => gl.deleteFramebuffer(f));
   R.E.forEach(e => gl.deleteTexture(e));
+  gl.deleteTexture(R.A);
   R = null;
 }
 
-// The exact response of the middle to a wave switched on (over RAMP) at the faces, for each
-// frequency, pattern size |q| = k x (x = 0..1, NQ samples) and age (0..ARRIVE, NA samples),
-// relative to its steady state: the Klein-Gordon signalling solution
-//   u(t) = f(t - T) - q h int_T^t J1(c q sqrt(tau^2 - T^2)) / sqrt(tau^2 - T^2) f(t - tau) dtau,
-// T = h / c, f = e^{-i w t} S(t), divided by the steady state e^{-i w t} e^{i h sqrt(k^2 - q^2)}.
-function besselJ1(x) {
-  const ax = Math.abs(x);
-  if (ax < 8) {
-    const y = x * x;
-    return x * (72362614232.0 + y * (-7895059235.0 + y * (242396853.1 + y * (-2972611.439 + y * (15704.48260 + y * -30.16036606))))) /
-      (144725228442.0 + y * (2300535178.0 + y * (18583304.74 + y * (99447.43394 + y * (376.9991397 + y)))));
+// ---------------------------------------------------------------- the response from an end
+// For each frequency, band node (|kx| / k = 1 / s) and distance T (in light-seconds, 0..tmax):
+// the field at that distance from an end that switches the mode on over RAMP, relative to its
+// steady state, at ages 0..amax. The mode crosses as a Klein-Gordon wave, kx(w) = sqrt(w^2 -
+// kappa^2) (c = 1, kappa^2 = k^2 - kx^2: its wavenumber across the guide), so
+//   E(T, t) = (1 / 2 pi) int R^(W) e^{i (kx(w + W) - kx(w)) T} e^{-i W t} dW,
+// R^ the spectrum of the switch-on; evaluated by FFT (the switch-on made a long pulse, so it
+// is periodic, and read before it ends).
+function fftInPlace(re, im, sign) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { let x = re[i]; re[i] = re[j]; re[j] = x; x = im[i]; im[i] = im[j]; im[j] = x; }
   }
-  const z = 8 / ax, y = z * z, xx = ax - 2.356194491;
-  const p1 = 1 + y * (0.183105e-2 + y * (-0.3516396496e-4 + y * (0.2457520174e-5 + y * -0.240337019e-6)));
-  const p2 = 0.04687499995 + y * (-0.2002690873e-3 + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
-  return Math.sqrt(0.636619772 / ax) * (Math.cos(xx) * p1 - z * Math.sin(xx) * p2) * Math.sign(x);
+  for (let len = 2; len <= n; len <<= 1) {
+    const a = sign * 2 * Math.PI / len, wr = Math.cos(a), wi = Math.sin(a);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const p = i + j, q = p + len / 2;
+        const xr = re[q] * cr - im[q] * ci, xi = re[q] * ci + im[q] * cr;
+        re[q] = re[p] - xr; im[q] = im[p] - xi;
+        re[p] += xr; im[p] += xi;
+        const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
+      }
+    }
+  }
 }
-function computeResponse() {
+function computeResponse(tmax, amax) {
   const ramp = x => x <= 0 ? 0 : x >= RAMP ? 1 : 0.5 - 0.5 * Math.cos(Math.PI * x / RAMP);
-  const DT = 1 / 300;                                  // s: integration step
-  const NT = Math.ceil((ARRIVE - HT) / DT) + 1;
-  const NM = Math.ceil(Math.max(FOCUS, RAMP) / DT) + 1;   // the drive is steady after this many steps
-  const tables = [new Float32Array(NQ * NA * 4), new Float32Array(NQ * NA * 4)];
-  const pr = new Float64Array(NT), pi = new Float64Array(NT), cr = new Float64Array(NT + 1), ci = new Float64Array(NT + 1);
-  const mr = new Float64Array(NM + 1), mi = new Float64Array(NM + 1);
-  for (let b = 0; b < 3; b++) {
-    const w = 2 * Math.PI * FREQ[b], cT = HT;          // units: time in s, lengths in c * s
-    const k = w;                                       // k = w / c with c = 1
-    const h = HT;                                      // h = c T
-    const tab = tables[b >> 1], ch = (b & 1) * 2;
-    for (let iq = 0; iq < NQ; iq++) {
-      const q = k * iq / (NQ - 1), m = q;              // m = c q
-      const kz = Math.sqrt(Math.max(k * k - q * q, 0));
-      for (let i = 0; i < NT; i++) {                   // the kernel times e^{i w tau}, tau = T + i DT
-        const tau = cT + i * DT, s2 = Math.sqrt(Math.max(tau * tau - cT * cT, 0));
-        const kv = q * h * (s2 > 1e-9 ? besselJ1(m * s2) / s2 : m / 2) * DT * (i === 0 ? 0.5 : 1);
-        pr[i] = kv * Math.cos(w * tau); pi[i] = kv * Math.sin(w * tau);
-        cr[i + 1] = cr[i] + pr[i]; ci[i + 1] = ci[i] + pi[i];
+  const DT = 1 / 24;
+  const pulse = amax + 2;
+  const N = pow2AtLeast(Math.ceil((2 * amax + 6) / DT));
+  const Rr = new Float64Array(N), Ri = new Float64Array(N);
+  for (let n = 0; n < N; n++) Rr[n] = (ramp(n * DT) - ramp(n * DT - pulse)) * DT;
+  fftInPlace(Rr, Ri, 1);                               // R^(W_m), W_m = 2 pi m / (N DT)
+  const tables = [new Float32Array(NODES * ND * NA * 4), new Float32Array(NODES * ND * NA * 4)];
+  const er = new Float64Array(N), ei = new Float64Array(N);
+  const dkr = new Float64Array(N), dki = new Float64Array(N);
+  for (let f = 0; f < 3; f++) {
+    const w = 2 * Math.PI * FREQ[f];
+    const tab = tables[f >> 1], ch = (f & 1) * 2;
+    for (let b = 0; b < NODES; b++) {
+      const kx0 = w * Math.exp(-(LS0 + b * DLS));       // kx at this node
+      const kap2 = w * w - kx0 * kx0;
+      for (let m = 0; m < N; m++) {                     // kx(w + W) - kx(w), causal branch
+        const W = 2 * Math.PI * (m < N / 2 ? m : m - N) / (N * DT), om = w + W;
+        const s = om * om - kap2;
+        if (s >= 0) { dkr[m] = Math.sign(om) * Math.sqrt(s) - kx0; dki[m] = 0; }
+        else { dkr[m] = -kx0; dki[m] = Math.sqrt(-s); }
       }
-      // What the faces send for this pattern, relative to the steady drive: switched on over
-      // RAMP, focused DEFOCUS wavelengths from the screen at first (a phase (kz - k) x
-      // distance on each pattern), the focus pulled in over FOCUS, slowing to a stop.
-      const dphi = (kz - k) * DEFOCUS / F_REF;
-      for (let i = 0; i <= NM; i++) {
-        const sT = i * DT, u = Math.min(1, sT / FOCUS), ph = dphi * (1 - u) * (1 - u), am = ramp(sT);
-        mr[i] = am * Math.cos(ph); mi[i] = am * Math.sin(ph);
-      }
-      const nr = Math.cos(-h * kz), ni = Math.sin(-h * kz);   // divide by the steady state
-      for (let ia = 0; ia < NA; ia++) {
-        const a = ARRIVE * ia / (NA - 1);
-        let er = 0, ei = 0;
-        if (a > cT) {
-          const last = Math.min(NT - 1, Math.floor((a - cT) / DT));
-          const l0 = Math.min(last, NM);
-          const c0 = Math.cos(w * cT), s0 = Math.sin(w * cT);
-          er = c0 * mr[l0] - s0 * mi[l0]; ei = c0 * mi[l0] + s0 * mr[l0];
-          const full = last - NM;                       // the drive was steady up to here
-          if (full >= 0) { er -= cr[full + 1]; ei -= ci[full + 1]; }
-          for (let i = Math.max(0, full + 1); i <= last; i++) {
-            const j = last - i;
-            er -= pr[i] * mr[j] - pi[i] * mi[j]; ei -= pr[i] * mi[j] + pi[i] * mr[j];
-          }
+      for (let iT = 0; iT < ND; iT++) {
+        const T = tmax * iT / (ND - 1);
+        for (let m = 0; m < N; m++) {
+          const mag = Math.exp(-dki[m] * T), ph = dkr[m] * T;
+          const c = mag * Math.cos(ph), s = mag * Math.sin(ph);
+          er[m] = Rr[m] * c - Ri[m] * s; ei[m] = Rr[m] * s + Ri[m] * c;
         }
-        let rr = er * nr - ei * ni, ri = er * ni + ei * nr;
-        const fade = Math.min(1, Math.max(0, (a - (ARRIVE - SETTLE_BLEND)) / SETTLE_BLEND));
-        const f = fade * fade * (3 - 2 * fade);
-        rr += (1 - rr) * f; ri += (0 - ri) * f;
-        const o = (ia * NQ + iq) * 4 + ch;
-        tab[o] = rr; tab[o + 1] = ri;
+        fftInPlace(er, ei, -1);
+        const norm = 1 / (N * DT);
+        for (let ia = 0; ia < NA; ia++) {
+          const a = amax * ia / (NA - 1), x = a / DT, n0 = Math.min(N - 2, Math.floor(x)), fx = x - n0;
+          let rr = (er[n0] * (1 - fx) + er[n0 + 1] * fx) * norm;
+          let ri = (ei[n0] * (1 - fx) + ei[n0 + 1] * fx) * norm;
+          const fade = Math.min(1, Math.max(0, (a - (amax - SETTLE_BLEND)) / SETTLE_BLEND));
+          const sm = fade * fade * (3 - 2 * fade);
+          rr += (1 - rr) * sm; ri -= ri * sm;
+          const o = ((ia * NODES + b) * ND + iT) * 4 + ch;
+          tab[o] = rr; tab[o + 1] = ri;
+        }
       }
     }
   }
   return tables;
 }
-let tableData = null;          // the tables depend on nothing in the layout: computed once
+let tableKey = '', tableData = null;
 function responseTables() {
-  if (!tableData) tableData = computeResponse();
-  const tables = tableData;
-  return tables.map(data => {
-    const t = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, t);
+  const key = `${phys.tmax.toFixed(4)} ${phys.amax.toFixed(4)}`;
+  if (key !== tableKey) { tableData = computeResponse(phys.tmax, phys.amax); tableKey = key; }
+  return tableData.map(data => {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
     nearest(gl.TEXTURE_2D);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, NQ, NA, 0, gl.RGBA, gl.FLOAT, data);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, NODES * ND, NA, 0, gl.RGBA, gl.FLOAT, data);
     if (LINEAR) {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     }
-    return t;
+    return tex;
   });
 }
 
 function allocate() {
   freeResources();
-  if (Math.max(FX, FY) > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('grid too large');
+  if (Math.max(FX, FY, NODES * ND) > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('grid too large');
+  const A = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, A);
+  nearest(gl.TEXTURE_2D);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, HH, 1, 0, gl.RED, gl.FLOAT, null);
   R = {
     pair: [target(FX, FY), target(FX, FY)],      // transforms and fitting
-    keep: target(FX, FY),                        // the fitted field, while it is split into strips
+    mix: target(FX, FY),                         // the fitted light, transformed in y only
     page: target(FX, FY, true),                  // the page (linear sRGB)
-    cur: [target(FX, FY, true), target(FX, FY, true)],   // the field in the middle now (conjugated)
-    see: target(FX, FY, true),                   // what it looks like (linear sRGB)
-    S: layers(FX, FY, 2 * RANKS * MAX_SNAP),     // the changes in flight: slot s, strip r, part p
-    E: responseTables(),                         // the response of each pattern to a change
+    fit: [target(FX, FY, true), target(FX, FY, true)],   // the last fit (steady field), per part
+    L: layers(WW, HH, 2 * 2 * NODES),            // the bands: part, end, node
+    cur: [target(WW, HH, true), target(WW, HH, true)],   // the field now, on the window
+    see: target(WW, HH, true),                   // what it looks like (linear sRGB)
+    E: responseTables(),                         // the response of each band
+    A,                                           // the age of each window row's light
   };
-  for (const r of R.cur) { gl.bindFramebuffer(gl.FRAMEBUFFER, r.f); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
-  snaps = []; fromDark = true; hasCur = false; t = 0;
+  ageBuf = new Float32Array(HH);
+  hasFit = false; job = null;
+  t = 0;
 }
 
 // ---------------------------------------------------------------- page -> drive
@@ -611,110 +598,150 @@ function capturePage(row) {
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, FX, FY, gl.RGBA, gl.FLOAT, pageBuf);
 }
 
-// Forward FFT in place over the ping-pong pair, starting from pair[a]; the index of the result.
-function fft(a) {
+// Forward FFT in place over the ping-pong pair, starting from pair[a], along x, y or both (x only
+// over grid rows [rows[0], rows[1]) if given); the index of the result.
+function fft(a, axes = 'xy', rows = null) {
   const pair = R.pair;
-  for (const [horiz, size] of [[1, FX], [0, FY]]) {
+  const passes = axes === 'x' ? [[1, FX]] : axes === 'y' ? [[0, FY]] : [[1, FX], [0, FY]];
+  for (const [horiz, size] of passes) {
     for (let sub = 2; sub <= size; sub *= 2) {
       run(P.fft, pair[1 - a].f, FX, FY, { src: pair[a].t }, u => {
         gl.uniform1i(u.size, size); gl.uniform1i(u.sub, sub); gl.uniform1i(u.horiz, horiz);
-      });
+      }, ...(rows && horiz ? [rows[0], rows[1] - rows[0]] : []));
       a = 1 - a;
     }
   }
   return a;
 }
-const kcOf = part => [BAND * phys.k[2 * part], BAND * (phys.k[2 * part + 1] || phys.k[2])];
+const kOf = part => [phys.k[2 * part], phys.k[2 * part + 1] || phys.k[2]];
+const mod = (a, n) => ((a % n) + n) % n;
 
-// Fit the page (captured at `row`) and store what the faces must deliver, into slot `slot`.
-function fitDrive(slot, row) {
+// The page rows lit, and when.
+const litAt = row => { const i = row + LIT0; return i >= 0 && i < lit.length ? lit[i] : NaN; };
+function setLit(row, v) { const i = row + LIT0; if (i >= 0 && i < lit.length) lit[i] = v; }
+
+// Fit the page (captured at page row `row`) and split what the ends must send into bands, a step
+// at a time (a generator: the steps can be spread over frames). Rows still on the screen since the
+// last fit keep their light; the rest of the screen is new, and only it (and a margin, where the
+// band limit lets the two meet) is split again. The bands are kept by page row, modulo HH.
+function* fitJob(row, iters) {
   const pair = R.pair, T = R.page.t;
+  const cs = row - fitRow;
+  let l0 = 0, l1 = 0;                                // grid rows kept
+  if (hasFit) {
+    const a = Math.max(row, fitRow), b = Math.min(row + H, fitRow + H);
+    if (b > a) { l0 = OY + a - row; l1 = OY + b - row; }
+  }
+  // Grid rows to split again: all of the window, or the new rows and a margin.
+  let s0 = OY - RING, s1 = OY + H + RING;
+  if (l1 > l0) {
+    const M = RING;
+    const top = l0 > OY, bottom = l1 < OY + H;
+    s0 = top ? OY - RING : l1 - M;
+    s1 = bottom ? OY + H + RING : l0 + M;
+    if (top && bottom) { s0 = OY - RING; s1 = OY + H + RING; }
+    if (!top && !bottom) { s0 = s1 = 0; }
+  }
+  const rows = [s0, s1];
   for (let part = 0; part < 2; part++) {
     const share = new Float32Array([...MIX[2 * part], ...MIX[2 * part + 1]]);
-    const kc = kcOf(part);
-    run(P.gsInit, pair[0].f, FX, FY, { T, C: R.cur[part].t }, u => {
-      gl.uniform2i(u.F, FX, FY); gl.uniform3fv(u.share, share);
-      gl.uniform2f(u.k, phys.k[2 * part], phys.k[2 * part + 1] || phys.k[2]); gl.uniform1f(u.xc, OX + W / 2);
-      gl.uniform1i(u.cs, row - curRow); gl.uniform1i(u.hasC, hasCur ? 1 : 0);
+    const k = kOf(part);
+    const bandPass = a => run(P.gsBand, pair[1 - a].f, FX, FY, { X: pair[a].t }, u => { gl.uniform2i(u.F, FX, FY); gl.uniform2f(u.k, k[0], k[1]); });
+    run(P.gsInit, pair[0].f, FX, FY, { T, C: R.fit[part].t }, u => {
+      gl.uniform3fv(u.share, share); gl.uniform2f(u.k, k[0], k[1]); gl.uniform1f(u.xc, OX + W / 2);
+      gl.uniform1i(u.cs, cs); gl.uniform2i(u.lit, l0, l1);
     });
     let a = 0;
-    for (let it = 0; it < GS_ITERS; it++) {
+    for (let it = 0; it < iters; it++) {
       a = fft(a);
-      run(P.gsBand, pair[1 - a].f, FX, FY, { X: pair[a].t }, u => { gl.uniform2i(u.F, FX, FY); gl.uniform2fv(u.kc, kc); });
+      bandPass(a);
+      yield;
       a = fft(1 - a);
-      run(P.gsPhase, pair[1 - a].f, FX, FY, { Y: pair[a].t, T }, u => {
+      run(P.gsPhase, pair[1 - a].f, FX, FY, { Y: pair[a].t, T, C: R.fit[part].t }, u => {
         gl.uniform3fv(u.share, share); gl.uniform4i(u.win, OX, OY, W, H); gl.uniform1i(u.ring, RING);
+        gl.uniform1i(u.cs, cs); gl.uniform2i(u.lit, l0, l1);
       });
       a = 1 - a;
+      yield;
     }
-    run(P.copy, R.keep.f, FX, FY, { X: pair[a].t });
-    for (let r = 0; r < RANKS; r++) {
-      run(P.mask, pair[0].f, FX, FY, { X: R.keep.t }, u => { gl.uniform1i(u.r, r); gl.uniform1i(u.ox, OX); gl.uniform1i(u.w, W); });
-      const b = fft(0);
-      run(P.store, R.S.fbos[(slot * RANKS + r) * 2 + part], FX, FY, { X: pair[b].t }, u => { gl.uniform2i(u.F, FX, FY); gl.uniform2fv(u.kc, kc); });
+    // The light the ends deliver: band-limited, transformed back in y (x still spectral).
+    a = fft(a);
+    bandPass(a);
+    a = fft(1 - a, 'y');
+    run(P.take, R.mix.f, FX, FY, { X: pair[a].t }, u => gl.uniform2i(u.org, 0, 0));   // (conjugated back)
+    yield;
+    // The steady field, kept to start the next fit from.
+    const win = [OY - RING, OY + H + RING];
+    run(P.take, pair[0].f, FX, FY, { X: R.mix.t }, u => gl.uniform2i(u.org, 0, 0), win[0], HH);
+    a = fft(0, 'x', win);
+    run(P.take, R.fit[part].f, FX, FY, { X: pair[a].t }, u => gl.uniform2i(u.org, 0, 0), win[0], HH);
+    yield;
+    // Each band from each end, into the rows it belongs to.
+    if (s1 > s0) {
+      for (let side = 0; side < 2; side++) {
+        for (let node = 0; node < NODES; node++) {
+          run(P.hat, pair[0].f, FX, FY, { X: R.mix.t }, u => {
+            gl.uniform2i(u.F, FX, FY); gl.uniform2f(u.k, k[0], k[1]);
+            gl.uniform1i(u.side, side); gl.uniform1i(u.node, node);
+          }, s0, s1 - s0);
+          a = fft(0, 'x', rows);
+          const layer = R.L.fbos[(part * 2 + side) * NODES + node];
+          // grid row g is page row row + g - OY, kept at slot mod(that, HH); in at most two runs
+          for (let g = s0; g < s1;) {
+            const slot = mod(row + g - OY, HH), n = Math.min(s1 - g, HH - slot);
+            run(P.take, layer, WW, HH, { X: pair[a].t }, u => gl.uniform2i(u.org, OX - RING, g - slot), slot, n);
+            g += n;
+          }
+          if (node % 4 === 3) yield;
+        }
+      }
     }
   }
+  // Done: the new fit stands. Rows on the screen keep their time; new ones are switched on now;
+  // the rest are gone.
+  const keep = new Float64Array(H);
+  for (let i = 0; i < H; i++) keep[i] = litAt(row + i);
+  lit.fill(NaN);
+  for (let i = 0; i < H; i++) setLit(row + i, Number.isNaN(keep[i]) ? t : keep[i]);
+  fitRow = row; hasFit = true;
 }
 
 const rowNow = () => Math.floor(scrollY * d);
-const room = () => FY - H - RING;     // rows a change can scroll before it would wrap round
-// Forgetting the oldest change is exact once the next has arrived (the next then stands alone),
-// or once the oldest has scrolled off the screen (nothing of it is left to see: the next then
-// arrives over darkness). Otherwise it would make the next arrive at once.
-const dropOldest = gone => { snaps.shift(); fromDark = gone; };
+let job = null;                // a fit in progress
 
-// The faces switch to the page as it is now.
-function changeDrive(now) {
+// The ends switch to the page as it is now: at once (fresh: everything forms again from
+// darkness), or spread over the next frames (scrolling).
+function changeDrive(now, fresh) {
   const row = rowNow();
-  if (snaps.length === MAX_SNAP) dropOldest(false);
-  const used = new Set(snaps.map(s => s.slot));
-  let slot = 0;
-  while (used.has(slot)) slot++;
+  if (fresh) { lit.fill(NaN); hasFit = false; }
   capturePage(row);
-  fitDrive(slot, row);
-  snaps.push({ slot, t0: t, row });
+  job = fitJob(row, hasFit ? GS_ITERS_SCROLL : GS_ITERS);
+  if (fresh) { while (!job.next().done); job = null; }
   lastStep = now;
 }
-
-// Forget changes that have fully arrived, or scrolled off the screen (or too far to keep).
-function prune() {
-  const row = rowNow();
-  while (snaps.length) {
-    const away = Math.abs(row - snaps[0].row);
-    if (snaps.length > 1 && t - snaps[1].t0 > DONE) dropOldest(false);
-    else if (away > H + RING) dropOldest(true);
-    else if (snaps.length > 1 && away > room()) dropOldest(false);
-    else break;
-  }
+// Some steps of the fit in progress; true when it has finished.
+function stepJob(n) {
+  for (let i = 0; i < n && job; i++) if (job.next().done) job = null;
+  return !job;
 }
 
-// While scrolling, the faces change when the page pauses, and only when the change can be kept
-// until it has arrived: none is ever cut short. (Scrolled far, the old light leaves the screen
-// and it goes dark until then.)
-function scrollStep(now) {
-  if (!moved || now - lastStep < STEP_GAP || now - lastScroll < IDLE || snaps.length === MAX_SNAP) return;
-  changeDrive(now);
-  moved = false;
-}
-
-// The field in the middle now, and what it looks like.
+// The field now, and what it looks like.
 function render() {
   const row = rowNow();
-  const n = snaps.length;
-  const slot = new Int32Array(MAX_SNAP), sh = new Int32Array(MAX_SNAP), age = new Float32Array(MAX_SNAP);
-  snaps.forEach((s, j) => { age[j] = t - s.t0; sh[j] = row - s.row; slot[j] = s.slot; });
-  for (let part = 0; part < 2; part++) {
-    run(P.combine, R.pair[0].f, FX, FY, { S: [gl.TEXTURE_2D_ARRAY, R.S.t], E: R.E[part] }, u => {
-      gl.uniform2i(u.F, FX, FY);
-      gl.uniform1i(u.count, n); gl.uniform1i(u.fromDark, fromDark ? 1 : 0); gl.uniform1i(u.part, part);
-      gl.uniform1iv(u.slot, slot); gl.uniform1iv(u.sh, sh); gl.uniform1fv(u.age, age);
-      gl.uniform2f(u.k, phys.k[2 * part], phys.k[2 * part + 1] || phys.k[2]);
-    });
-    const a = fft(0);
-    run(P.copy, R.cur[part].f, FX, FY, { X: R.pair[a].t });
+  for (let j = 0; j < HH; j++) {
+    const s = litAt(row + j - RING);
+    ageBuf[j] = Number.isNaN(s) ? -1 : t - s;
   }
-  curRow = row; hasCur = true;
-  run(P.see, R.see.f, FX, FY, { C0: R.cur[0].t, C1: R.cur[1].t }, u => gl.uniformMatrix3fv(u.see, false, SEE_MAT));
+  gl.bindTexture(gl.TEXTURE_2D, R.A);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, HH, 1, gl.RED, gl.FLOAT, ageBuf);
+  for (let part = 0; part < 2; part++) {
+    run(P.combine, R.cur[part].f, WW, HH, { L: [gl.TEXTURE_2D_ARRAY, R.L.t], E: R.E[part], A: R.A }, u => {
+      gl.uniform1i(u.part, part); gl.uniform1i(u.base, mod(row - RING, HH));
+      gl.uniform1i(u.hh, HH); gl.uniform1i(u.ww, WW);
+      gl.uniform1f(u.cps, phys.cps); gl.uniform1f(u.tmax, phys.tmax); gl.uniform1f(u.amax, phys.amax);
+    });
+  }
+  run(P.see, R.see.f, WW, HH, { C0: R.cur[0].t, C1: R.cur[1].t }, u => gl.uniformMatrix3fv(u.see, false, SEE_MAT));
 }
 
 function hex(v) {
@@ -730,19 +757,27 @@ function readColors() {
 
 function draw() {
   run(P.disp, null, canvas.width, canvas.height, { E0: R.see.t }, u => {
-    gl.uniform2i(u.F, FX, FY); gl.uniform2i(u.off, OX, OY);
+    gl.uniform2i(u.F, WW, HH); gl.uniform2i(u.off, RING, RING);
     gl.uniform2f(u.res, canvas.width, canvas.height);
     gl.uniform2f(u.cells, W, H);
     gl.uniform1f(u.fy, scrollY * d - rowNow());
   });
 }
 
-const settled = () => snaps.length > 0 && t - snaps[snaps.length - 1].t0 > DONE;
-function hud() {
-  const x = snaps.length ? Math.min(1, (t - snaps[snaps.length - 1].t0) / DONE) : 0;
+// How far the light on the screen has arrived: its youngest row's age, of amax.
+function arrived() {
+  const row = rowNow();
+  let x = 1;
+  for (let i = 0; i < H; i++) {
+    const s = litAt(row + i);
+    x = Math.min(x, Number.isNaN(s) ? 0 : (t - s) / phys.amax);
+  }
+  return Math.max(0, x);
+}
+function hud(x) {
   hudText.textContent =
-    `colour = what the eye sees of light at ${LAMBDA.join(', ')} nm, run at ${FREQ.map(f => f.toFixed(1)).join(', ')} Hz · ` +
-    `sent in only from the faces of a slab ${DEPTH * 2} wavelengths thick, out of focus first, then focused · wavelength at 10 Hz ${Math.round(phys.wl)} px · ` +
+    `colour = what the eye sees of light at ${LAMBDA.join(', ')} nm, run at ${FREQ.map(f => Math.round(f)).join(', ')} Hz · ` +
+    `sent in only from the left and right ends of a deep waveguide · wavelength at ${F_REF} Hz ${Math.round(phys.wl)} px · ` +
     `${x >= 1 ? 'standing' : `arriving ${Math.round(100 * x)}%`}`;
 }
 
@@ -754,27 +789,27 @@ function tick(now) {
   raf = 0;
   if (!R) return;                             // waves switched off
   t += lastFrame ? Math.min(1 / 30, (now - lastFrame) / 1000) : 1 / 60;
-  scrollStep(now);
-  prune();
+  if (job) stepJob(STEPS);
+  else if (moved && now - lastStep >= STEP_GAP) { changeDrive(now, false); moved = false; stepJob(STEPS); }
   render();
   draw();
-  hud();
-  const more = moved || !settled();
+  const x = arrived();
+  hud(x);
+  const more = moved || job || x < 1;
   lastFrame = more ? now : 0;
   if (more) loop();
 }
 
 // Start already standing (reduced motion): everything has arrived.
 function warmUp() {
-  for (const s of snaps) s.t0 = t - DONE - 1;
-  prune();
+  for (let i = 0; i < lit.length; i++) if (!Number.isNaN(lit[i])) lit[i] = t - phys.amax - 1;
 }
 
-addEventListener('scroll', () => { if (R) { moved = true; lastScroll = performance.now(); loop(); } }, { passive: true });
+addEventListener('scroll', () => { if (R) { moved = true; loop(); } }, { passive: true });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (!R) return;
   readColors();
-  changeDrive(performance.now());   // a new palette is a new page
+  changeDrive(performance.now(), true);   // a new palette is a new page
   loop();
 });
 
@@ -817,21 +852,24 @@ function layout() {
   for (;;) {
     W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
     FX = pow2AtLeast(W + 2 * RING); FY = pow2AtLeast(H + 2 * RING);
-    // Room to scroll a change: enough for it to leave the screen before it would wrap round, if
-    // that fits; at least half a screen.
-    if (FY - H - RING < H + RING && (FX * FY * 2 <= MAX_TEXELS || FY - H - RING < H / 2)) FY *= 2;
     if (FX * FY <= MAX_TEXELS || d < 0.05) break;
     d *= 0.95;
   }
   d = W / Lx;
   OX = (FX - W) >> 1; OY = (FY - H) >> 1;
+  WW = W + 2 * RING; HH = H + 2 * RING;
   const wl = Math.max(wavelength, PPW / d * FREQ[0] / F_REF);
   phys.wl = wl;
   phys.k = FREQ.map(f => 2 * Math.PI / (wl * F_REF / f * d));     // radians per grid point
+  phys.cps = wl * d * F_REF;                                       // light speed, grid points per s
+  phys.tmax = WW / phys.cps;                                       // s: light across the window
+  phys.amax = phys.tmax / GRAZE * 1.5 + RAMP + SETTLE_BLEND;       // s: until the slowest band is in
+  LIT0 = RING + 8;
+  lit = new Float64Array(Math.ceil(document.documentElement.scrollHeight * d) + 2 * (H + RING) + 32).fill(NaN);
   allocate();
 }
 
-// Waves on: the canvas draws the page, sent in from the faces from scratch. Off: the plain page,
+// Waves on: the canvas draws the page, sent in from the ends from scratch. Off: the plain page,
 // with the simulation stopped and its GPU memory freed. The choice is remembered.
 function setWaves(on, settledStart) {
   modeButton.setAttribute('aria-pressed', String(on));
@@ -857,7 +895,7 @@ function setWaves(on, settledStart) {
   }
   showWavelength();
   moved = false; lastFrame = 0;
-  changeDrive(performance.now());
+  changeDrive(performance.now(), true);
   if (settledStart || reduce.matches) warmUp();
   loop();
 }
@@ -874,7 +912,7 @@ function setWavelength(v) {
   if (!R) return;
   try { layout(); } catch (e) { console.warn('waves: grid for this wavelength failed', e); return; }
   moved = false; lastFrame = 0;
-  changeDrive(performance.now());
+  changeDrive(performance.now(), true);
   showWavelength();
   loop();
 }
@@ -901,7 +939,7 @@ function start() {
     timer = setTimeout(() => {
       if (!R || (canvas.clientWidth === Lx && canvas.clientHeight === Ly)) return;
       layout();
-      changeDrive(performance.now());         // a new box: the page forms again
+      changeDrive(performance.now(), true);         // a new box: the page forms again
       loop();
     }, 180);
   });
