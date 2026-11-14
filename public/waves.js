@@ -73,6 +73,7 @@ const MAX_SNAP = 4;        // page changes kept in flight at most
 const RANKS = 1;           // strips from the edges to the middle, each switched at its own time (1: all at once)
 const SWEEP = 0;           // s: from the edges' switch to the middle's
 const STEP_GAP = 220;      // ms: at most one drive change per this interval while scrolling
+const IDLE = 120;          // ms: the faces change once the page has stopped scrolling this long
 const HT = DEPTH / F_REF;  // s: the head-on crossing time h / c
 const ARRIVE = HT + FOCUS + 2;   // s: the response is tabulated up to this age ...
 const SETTLE_BLEND = 1;    // s: ... its last slow ringing faded out over this, before the end
@@ -427,7 +428,7 @@ let t = 0;                     // s of time
 let snaps = [];                // page changes in flight, oldest first: { slot, t0, row }
 let fromDark = true;           // the oldest change came in over darkness
 let curRow = 0, hasCur = false;   // the grid row the field now (R.cur) was made at
-let raf = 0, moved = false, lastStep = -1e9, colors = null;
+let raf = 0, moved = false, lastStep = -1e9, lastScroll = -1e9, colors = null;
 const SEE_MAT = new Float32Array([SEE[0][0], SEE[1][0], SEE[2][0], SEE[0][1], SEE[1][1], SEE[2][1], SEE[0][2], SEE[1][2], SEE[2][2]]);
 const pow2AtLeast = n => 1 << Math.ceil(Math.log2(Math.max(2, n)));
 
@@ -657,12 +658,15 @@ function fitDrive(slot, row) {
 
 const rowNow = () => Math.floor(scrollY * d);
 const room = () => FY - H - RING;     // rows a change can scroll before it would wrap round
-const dropOldest = () => { snaps.shift(); fromDark = false; };
+// Forgetting the oldest change is exact once the next has arrived (the next then stands alone),
+// or once the oldest has scrolled off the screen (nothing of it is left to see: the next then
+// arrives over darkness). Otherwise it would make the next arrive at once.
+const dropOldest = gone => { snaps.shift(); fromDark = gone; };
 
 // The faces switch to the page as it is now.
 function changeDrive(now) {
   const row = rowNow();
-  if (snaps.length === MAX_SNAP) dropOldest();
+  if (snaps.length === MAX_SNAP) dropOldest(false);
   const used = new Set(snaps.map(s => s.slot));
   let slot = 0;
   while (used.has(slot)) slot++;
@@ -672,10 +676,25 @@ function changeDrive(now) {
   lastStep = now;
 }
 
-// Forget changes that have fully arrived (or scrolled too far to keep).
+// Forget changes that have fully arrived, or scrolled off the screen (or too far to keep).
 function prune() {
   const row = rowNow();
-  while (snaps.length > 1 && (t - snaps[1].t0 > DONE || Math.abs(row - snaps[0].row) > room())) dropOldest();
+  while (snaps.length) {
+    const away = Math.abs(row - snaps[0].row);
+    if (snaps.length > 1 && t - snaps[1].t0 > DONE) dropOldest(false);
+    else if (away > H + RING) dropOldest(true);
+    else if (snaps.length > 1 && away > room()) dropOldest(false);
+    else break;
+  }
+}
+
+// While scrolling, the faces change when the page pauses, and only when the change can be kept
+// until it has arrived: none is ever cut short. (Scrolled far, the old light leaves the screen
+// and it goes dark until then.)
+function scrollStep(now) {
+  if (!moved || now - lastStep < STEP_GAP || now - lastScroll < IDLE || snaps.length === MAX_SNAP) return;
+  changeDrive(now);
+  moved = false;
 }
 
 // The field in the middle now, and what it looks like.
@@ -735,7 +754,7 @@ function tick(now) {
   raf = 0;
   if (!R) return;                             // waves switched off
   t += lastFrame ? Math.min(1 / 30, (now - lastFrame) / 1000) : 1 / 60;
-  if (moved && now - lastStep >= STEP_GAP) { changeDrive(now); moved = false; }
+  scrollStep(now);
   prune();
   render();
   draw();
@@ -751,7 +770,7 @@ function warmUp() {
   prune();
 }
 
-addEventListener('scroll', () => { if (R) { moved = true; loop(); } }, { passive: true });
+addEventListener('scroll', () => { if (R) { moved = true; lastScroll = performance.now(); loop(); } }, { passive: true });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (!R) return;
   readColors();
@@ -798,7 +817,9 @@ function layout() {
   for (;;) {
     W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
     FX = pow2AtLeast(W + 2 * RING); FY = pow2AtLeast(H + 2 * RING);
-    if (FY - H - RING < H / 2) FY *= 2;                            // room to scroll a change
+    // Room to scroll a change: enough for it to leave the screen before it would wrap round, if
+    // that fits; at least half a screen.
+    if (FY - H - RING < H + RING && (FX * FY * 2 <= MAX_TEXELS || FY - H - RING < H / 2)) FY *= 2;
     if (FX * FY <= MAX_TEXELS || d < 0.05) break;
     d *= 0.95;
   }
