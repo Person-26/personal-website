@@ -17,19 +17,21 @@
 // the same on both planes, so the field is mirror-symmetric and only z in [0, h] is stepped.
 //
 // The drive for a page: each frequency w's share of the page (its intensity, the phase free) is
-// fitted within the band of in-plane patterns q that can cross the slab as waves; finer ones
-// would only decay from the planes. For the discrete scheme the steady state is exact in closed
+// fitted within a band of in-plane patterns q. Those coarser than the wavelength cross the slab as
+// waves; finer ones (near field) do not travel but only decay away from the planes, yet the slab
+// is thin enough (h = 2 grid points) that they still reach the slice, so detail finer than the
+// wavelength forms too, down to the grid's own limit. For the discrete scheme the steady state is exact in closed
 // form: with x(q) = 1 + (sigma(q) - W^2) / 2 (sigma the in-plane Laplacian's symbol, W^2 the
 // scheme's own discrete w^2 with damping, over c^2), u_j = g cos(theta j) / cos(theta J) at layer
 // j, cos(theta) = x; so the slice holds the page when g = page x T_J(x), T_J the Chebyshev
 // polynomial. The fit leaves what light really does when made to draw: rings and coloured fringes
-// where the frequencies disagree. A shorter wavelength makes it as close as wanted.
+// where the frequencies disagree. A finer grid makes it as close as wanted.
 //
 // When the page changes (it loads, or it scrolls and more of it comes into view), the drive fades
 // over to the new page and the field carries on from where it is: the change comes in from the
-// planes and rings out across the slab, coarse patterns first (they cross head-on), fine ones
-// last (they cross at grazing angles). The field and drive scroll with the page: each stored
-// field remembers the grid row it was made at and is read shifted; what scrolls past an edge leaves.
+// planes: the near field (fine detail) follows the planes at once, the travelling waves
+// (coarse shapes and colour) arrive and ring out across the slab. The field and drive scroll with
+// the page: each stored field remembers the grid row it was made at and is read shifted; what scrolls past an edge leaves.
 (() => {
 'use strict';
 
@@ -48,13 +50,15 @@ const SEE = [
   [1.37121, -0.12184, -0.02223],
 ];
 const MIX = [[0.01429, 0.08145, 0.73388], [0.05097, 0.87585, 0.04892], [0.60214, 0.22381, 0.01526], [0, 0, 0]];
-const PPW = 5;             // grid points per wavelength of the finest (blue) light
-const LAYERS = 6;          // grid layers from the slice to the boundary plane (h = LAYERS points)
+const PPW = 5;             // grid points per wavelength of the finest (blue) light, at least
+const PX = 1;              // grid points per CSS px wanted (the finest detail the page can hold)
+const LAYERS = 2;          // grid layers from the slice to the boundary plane (h = LAYERS points)
 const MAX_CELLS = 3e6;     // grid points in the slab at most (else the wavelength is made longer)
-const BAND = 0.9;          // patterns fitted up to this fraction of each frequency's wavenumber
+const BAND = 0.9;          // travelling patterns fitted up to this fraction of each wavenumber ...
+const NEAR = 0.65 * Math.PI;   // ... and near-field ones up to this many radians per grid point
 const TAPER = 0.75;        // ... rolling off smoothly from this fraction of that
 const GS_ITERS = 6;        // phase-fit iterations per page change
-const ROUGH = 0.15;        // randomness of the phase the fit starts from (0: flat, 1: random)
+const ROUGH = 0;          // randomness of the phase the fit starts from where there is no field yet
 const GAMMA = 1.5;         // 1/s: damping; the field settles into a new page over a few 1/GAMMA
 const SETTLE = 8 / GAMMA;  // s: after this, a page counts as standing and stepping stops
 const PAD = 24;            // grid points of damping margin around the screen
@@ -122,26 +126,46 @@ vec2 taper(ivec2 n, vec2 kc) {   // raised-cosine band limit, per frequency of t
   return 0.5 + 0.5 * cos(3.14159265 * t);
 }`;
 
-// Start: each frequency's target amplitude (square root of its share of the page's light) with a
-// phase pattern fixed to the page (it moves with the text).
+// Start: each frequency's target amplitude (square root of its share of the page's light) with
+// the phase the field already has on the slice (from the last three steps, as the eye sees it;
+// see FS_SEE), so what has not changed is fitted as it stands and only the rest has to move.
+// Where there is no field yet, a phase pattern fixed to the page (it moves with the text).
 const FS_GS_INIT = HEAD + CPLX + `
 uniform sampler2D T;           // the page, linear sRGB, on the fit grid
-uniform int part, row;
-uniform float rough;
+uniform sampler2DArray U0, U1, U2;   // the field, two steps ago, one ago, now
+uniform ivec2 N;
+uniform int part, row, s0, s1, s2;
+uniform float rough, dt, tb;   // tb: the time one step ago
+uniform vec2 w;                // this part's two frequencies
 uniform vec3 share[2];         // this part's two rows of MIX
 float hash(int x, int y, int c) {
   uint h = uint(x) * 1664525u ^ uint(y) * 22695477u ^ uint(c) * 2654435761u;
   h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
   return float(h) / 4294967296.0;
 }
+vec2 at(sampler2DArray s, ivec2 p, int sh) {
+  p.y += sh;
+  if (p.x >= N.x || p.y < 0 || p.y >= N.y) return vec2(0.0);
+  vec3 u = texelFetch(s, ivec3(p, 0), 0).rgb;
+  return part == 0 ? u.rg : vec2(u.b, 0.0);
+}
+vec2 phase(vec2 z, float fallback) {   // weak field: towards the fixed pattern
+  z += 0.05 * cis(rough * 6.2831853 * fallback);
+  return z / length(z);
+}
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
   vec3 t = texelFetch(T, n, 0).rgb;
   float a0 = sqrt(max(dot(share[0], t), 0.0)), a1 = sqrt(max(dot(share[1], t), 0.0));
-  int y = n.y + row;
-  o = vec4(a0 * cis(rough * 6.2831853 * hash(n.x, y, 2 * part)), a1 * cis(rough * 6.2831853 * hash(n.x, y, 2 * part + 1)));
+  vec2 a = at(U0, n, s0), b = at(U1, n, s1), c = at(U2, n, s2);
+  vec2 ph = w * dt;
+  vec2 x = (c - 2.0 * b + a) / (2.0 * (cos(ph) - 1.0)), y = (c - a) / (2.0 * sin(ph));
+  // the complex amplitude A (u = Re(A e^{-i w t})) is (x + i y) e^{i w tb}
+  vec2 z0 = cmul(vec2(x.x, y.x), cis(w.x * tb)), z1 = cmul(vec2(x.y, y.y), cis(w.y * tb));
+  int yy = n.y + row;
+  o = vec4(a0 * phase(z0, hash(n.x, yy, 2 * part)), a1 * phase(z1, hash(n.x, yy, 2 * part + 1)));
 }`;
-// Keep only the patterns that can cross the slab, conjugated and scaled for the inverse transform.
+// Keep only the patterns fitted (see the top), conjugated and scaled for the inverse transform.
 const FS_GS_BAND = HEAD + SIGMA + `
 uniform sampler2D X;
 uniform vec2 kc;
@@ -233,9 +257,10 @@ uniform ivec2 N;
 uniform int j, J, shP, shC;
 uniform float dt, c2, g0, gEdge;
 vec3 U(sampler2DArray s, ivec2 p, int l, int sh) {
-  p.y += sh;
   if (p.x < 0 || p.y < 0 || p.x >= N.x || p.y >= N.y) return vec3(0.0);
-  if (l == J) return driveAt(p);        // the boundary condition
+  if (l == J) return driveAt(p);        // the boundary condition (the drives have their own shifts)
+  p.y += sh;
+  if (p.y < 0 || p.y >= N.y) return vec3(0.0);
   return texelFetch(s, ivec3(p, l < 0 ? -l : l), 0).rgb;   // mirror at the slice
 }
 float damping(ivec2 p) {
@@ -528,9 +553,15 @@ function fitDrive(slot, row) {
   for (let part = 0; part < 2; part++) {
     const share = new Float32Array([...MIX[2 * part], ...MIX[2 * part + 1]]);
     const kc = [phys.kc[2 * part], phys.kc[2 * part + 1]];
-    run(P.gsInit, pair[0].f, FX, FY, { T }, u => {
+    run(P.gsInit, pair[0].f, FX, FY, {
+      T, U0: [gl.TEXTURE_2D_ARRAY, R.U[2].t], U1: [gl.TEXTURE_2D_ARRAY, R.U[0].t], U2: [gl.TEXTURE_2D_ARRAY, R.U[1].t],
+    }, u => {
       gl.uniform1i(u.part, part); gl.uniform1i(u.row, row); gl.uniform3fv(u.share, share);
       gl.uniform1f(u.rough, +(params.get('rough') ?? ROUGH));
+      gl.uniform2i(u.N, Nx, Ny);
+      gl.uniform1i(u.s0, row - lrow[2]); gl.uniform1i(u.s1, row - lrow[0]); gl.uniform1i(u.s2, row - lrow[1]);
+      gl.uniform1f(u.dt, phys.dt); gl.uniform1f(u.tb, simT - phys.dt);
+      gl.uniform2f(u.w, OMEGA[2 * part], OMEGA[2 * part + 1] || OMEGA[2]);
     });
     let a = 0;
     for (let it = 0; it < GS_ITERS; it++) {
@@ -717,14 +748,14 @@ function enableGlide() {
 
 // The canvas is 100lvh tall, so a phone's URL bar showing or hiding does not resize the box.
 // The grid resolves the finest (blue) light with PPW points per wavelength; if the slab would have
-// too many points, the wavelength is made longer instead.
+// too many points, the grid is made coarser (and the wavelength longer, if needed) instead.
 function layout() {
   Lx = canvas.clientWidth; Ly = canvas.clientHeight;
   const dpr = Math.min(devicePixelRatio || 1, 2);
   canvas.width = Math.round(Lx * dpr);
   canvas.height = Math.round(Ly * dpr);
   const blue = wl => wl * F_REF / FREQ[0];                         // blue wavelength, CSS px
-  d = PPW / blue(wavelength);
+  d = Math.max(PX, PPW / blue(wavelength));
   for (;;) {
     W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
     if ((W + 2 * PAD) * (H + 2 * PAD) * LAYERS <= maxCells || d < 0.05) break;
@@ -737,12 +768,12 @@ function layout() {
   const c = wl * F_REF * d;                                         // grid points / s
   const dt = CFL / c;
   // Per frequency: the scheme's own w^2 and damping, over c^2 (for the steady state), and the
-  // band limit (a fraction of the discrete wavenumber).
+  // band limit (past the discrete wavenumber, into the near field).
   const W2re = [0, 0, 0, 0], W2im = [0, 0, 0, 0], kc = [1, 1, 1, 1];
   OMEGA.forEach((w, i) => {
     const wd2 = (2 - 2 * Math.cos(w * dt)) / (dt * dt), wg = Math.sin(w * dt) / dt;
     W2re[i] = wd2 / (c * c); W2im[i] = GAMMA * wg / (c * c);
-    kc[i] = BAND * Math.sqrt(W2re[i]);
+    kc[i] = Math.max(NEAR, BAND * Math.sqrt(W2re[i]));
   });
   Object.assign(phys, { wl, c, c2: c * c, dt, W2re, W2im, kc });
   allocate();
