@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Publications · Perry Cai</title>
+<meta name="description" content="Publications by Perry Cai.">
+<link rel="stylesheet" href="/waves.css">
+</head>
+<body>
+<canvas id="field" aria-hidden="true"></canvas>
+
+<main id="content" class="page">
+  <nav class="site-nav" aria-label="Site">
+    <a class="name" href="/">Perry Cai</a>
+    <a href="/cv">CV</a>
+    <a href="/publications" aria-current="page">Publications</a>
+    <a href="/site">This site</a>
+  </nav>
+  <section id="publications">
+    <h1>Publications</h1>
+    <div class="entry">
+      <h3>A Search for the Lost Comet P/2010 H2 (Vales)</h3>
+      <p>Q. Ye, T. L. Farnham, <strong>P. Cai</strong>, L. Feaga</p>
+      <p class="muted"><a href="https://doi.org/10.1016/j.icarus.2026.117052">Icarus 453, 117052</a> (2026)</p>
+    </div>
+  </section>
+</main>
+
+<div class="hud" aria-hidden="true"><span id="hud-text"></span></div>
+<div class="controls">
+  <label id="knob" class="knob" hidden>wavelength <input type="range" min="4" max="24" step="1" value="5"> <output>5 px</output></label>
+  <button id="mode" class="mode" type="button" aria-pressed="true" hidden>Waves: on</button>
+</div>
+
+<script src="/waves.js"></script>
+</body>
+</html>

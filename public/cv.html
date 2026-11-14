@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CV · Perry Cai</title>
+<meta name="description" content="CV of Perry Cai: education, research, projects, leadership and skills.">
+<link rel="stylesheet" href="/waves.css">
+</head>
+<body>
+<canvas id="field" aria-hidden="true"></canvas>
+
+<main id="content" class="page">
+  <nav class="site-nav" aria-label="Site">
+    <a class="name" href="/">Perry Cai</a>
+    <a href="/cv" aria-current="page">CV</a>
+    <a href="/publications">Publications</a>
+    <a href="/site">This site</a>
+  </nav>
+  <h1>CV</h1>
+  <section id="education">
+    <h2>Education</h2>
+    <div class="entry">
+      <h3>University of California, Santa Barbara</h3>
+      <p class="muted">Physics, B.S. · Class of 2030</p>
+    </div>
+    <div class="entry">
+      <h3>Belmont High School</h3>
+      <p class="muted">Class of 2026 · Harvard Extension: Multivariable Calculus, Linear Algebra</p>
+    </div>
+  </section>
+  <section id="research">
+    <h2>Research</h2>
+    <div class="entry">
+      <h3>Waves and instabilities of magnetohydrodynamics</h3>
+      <p class="muted">Lumiere Research Program, mentored by Alejandro Mesa-Dame · Summer 2025</p>
+      <p>Derived the linear ideal MHD dispersion relation (slow and fast magnetosonic, Alfvén, and entropy modes) and a generalized relation unifying the Kelvin–Helmholtz and Rayleigh–Taylor instabilities.</p>
+    </div>
+    <div class="entry">
+      <h3>Searching for the lost comet P/2010 H2 (Vales)</h3>
+      <p class="muted">University of Maryland, with Dr. Quanzhi Ye · Summer 2025</p>
+      <p>Enhanced telescope images and removed background stars, then estimated the comet's size and trajectory from incomplete data.</p>
+    </div>
+  </section>
+  <section id="projects">
+    <h2>Projects</h2>
+    <div class="entry">
+      <h3>Condor VTOL drone</h3>
+      <p class="muted">Avionics and simulation, SB Aeronautics (UCSB) · Fall 2026 to present</p>
+      <p>Aerodynamics, stability, and mass models wired into ArduPilot SITL for simulated flight tests.</p>
+      <p>A 915 MHz Wi-Fi HaLow telemetry link, designed with a two-ray propagation model and NEC2 and FDTD antenna simulations.</p>
+      <p>The onboard Linux system (Yocto) for the Orange Pi companion computer.</p>
+    </div>
+  </section>
+  <section id="leadership">
+    <h2>Leadership</h2>
+    <div class="entry">
+      <h3>Programming Lead, Record Robotics (FRC)</h3>
+      <p class="muted">2022 to 2026 · 7th in the New England District</p>
+    </div>
+    <div class="entry">
+      <h3>Founder and Captain, Belmont Aerospace Student Society</h3>
+      <p class="muted">2022 to 2026 · Drones for the Aerospace Robotics Competition</p>
+    </div>
+  </section>
+  <section id="skills">
+    <h2>Skills</h2>
+    <p>C++, Python, Java, LaTeX</p>
+    <p class="muted">Linux (Yocto), ArduPilot SITL, NEC2, FDTD</p>
+  </section>
+</main>
+
+<div class="hud" aria-hidden="true"><span id="hud-text"></span></div>
+<div class="controls">
+  <label id="knob" class="knob" hidden>wavelength <input type="range" min="4" max="24" step="1" value="5"> <output>5 px</output></label>
+  <button id="mode" class="mode" type="button" aria-pressed="true" hidden>Waves: on</button>
+</div>
+
+<script src="/waves.js"></script>
+</body>
+</html>
