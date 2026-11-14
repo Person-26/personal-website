@@ -58,21 +58,12 @@ sub, sup { font-size: 0.65em; }
 }
 @media (max-width: 560px) { .live .hud { display: none; } }
 
-/* Switch between the wave field and the plain page, and the carrier wavelength. */
+/* Switch between the wave field and the plain page. */
 .controls {
   position: fixed; z-index: 2;
   right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(10px + env(safe-area-inset-bottom, 0px));
   display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
 }
-.knob {
-  display: flex; align-items: center; gap: 8px;
-  font: 500 12px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--muted);
-  background: var(--bg); border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); border-radius: 999px;
-  padding: 4px 12px;
-}
-.knob[hidden] { display: none; }
-.knob input { width: 110px; margin: 0; accent-color: var(--neg); }
-.knob output { min-width: 4.5ch; text-align: right; color: var(--fg); }
 .mode {
   font: 500 12px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color: var(--fg); background: var(--bg);

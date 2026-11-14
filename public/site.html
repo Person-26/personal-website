@@ -19,8 +19,7 @@
   </nav>
   <section id="how">
     <h1>How this site is drawn</h1>
-    <p>Everything you see here is light, simulated. The screen is a wave field, and the field is a mix of three frequencies: those of blue (460 nm), green (540 nm) and red (620 nm) light, slowed down so that the middle of the visible range would be 200 Hz. Three are enough, as for a laser projector: the eye has only three kinds of colour receptor. Each pixel's colour is what those frequencies look like together: how strongly each one oscillates there, seen through the eye's sensitivity to colour. The white background is all three at once; dark text is where there is no light.</p>
-    <p>The screen is the middle of a deep waveguide filled with that field, running from just past the left edge of the screen to just past the right. Every frequency moves at the same speed, so each has its own wavelength. Nothing on the screen is drawn or driven directly. The only input is a boundary condition at the guide's two ends: each end sends in a prescribed wave and lets out whatever reaches it. The light crosses the guide at many angles, up, down and through its depth, and where it passes the middle, its interference is the page: a standing pattern that holds still while the light in it oscillates.</p>
+    <p>Everything you see here is simulated light. The screen is the middle of a waveguide, a slab of space between two ends just past the left and right edges of the window. Nothing on the screen is drawn directly: the only input is the light each end sends in. Where that light crosses in the middle, it interferes into the page.</p>
     <figure class="diagram">
       <svg class="figure" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" width="720" height="380" role="img" aria-labelledby="guide-title">
         <title id="guide-title">The waveguide: the screen is its middle plane, between a left and a right end that send light in at a slant</title>
@@ -81,17 +80,15 @@
           </g>
         </g>
       </svg>
-      <figcaption class="muted">The guide runs in x between its two ends, and goes on up and down (y) and deep (z). The screen is its middle plane. Light comes in only through the ends, at a slant, and its interference in the middle is the page.</figcaption>
+      <figcaption class="muted">Light enters only through the two ends, at a slant. The guide goes on up and down (y) and deep (z).</figcaption>
     </figure>
-    <p>What each end sends is worked out from the page: for each frequency, which waves must come in from each end to add up to the page in the middle. Only shapes coarser than about half a wavelength can be carried, and only by light that also travels sideways (light running almost straight up or down would take far too long to get in from the ends), so the page is held only approximately, with faint rings and coloured fringes where the three frequencies disagree. The light is slanted toward the middle: the left half of the page is carried mostly from the left end and the right half from the right, and where they meet in the middle there is a faint seam. The guide is uniform, so rather than stepping every point of it forward in time, each wave's journey in from its end is solved exactly: a front at the speed of light, then the wave itself at its slower sideways speed, spreading out as it goes.</p>
-    <p>So when the page loads, it is dark, and light comes in from both edges: the most slanted light first, sweeping toward the middle, the rest behind it, until the whole page stands. The ends switch their light on sharply, in a few cycles, so it does not fade in: each front rings, overshooting and settling in bright and dark bands that run ahead of it and trail behind it, a little differently for each colour. When you scroll, the field moves with the page and the ends keep up as it moves: each new line is lit from the moment it comes into view, and its light travels in from the edges while you watch. Light that scrolls off the screen is gone, so scrolling back means waiting for it again. The slider in the corner sets the wavelength at 200 Hz: shorter is sharper, longer is faster.</p>
+    <p>The light is three frequencies, blue, green and red, which is enough for the eye, as in a laser projector. What each end must send is worked out from the page, but light can only carry shapes larger than about half a wavelength, so you'll see faint rings and coloured fringes. When a page loads or you scroll, the light has to travel in from the edges, so the page forms from the sides inward.</p>
     <p class="muted"><a href="https://github.com/Person-26/personal-website">Source on GitHub</a></p>
   </section>
 </main>
 
 <div class="hud" aria-hidden="true"><span id="hud-text"></span></div>
 <div class="controls">
-  <label id="knob" class="knob" hidden>wavelength <input type="range" min="4" max="24" step="1" value="5"> <output>5 px</output></label>
   <button id="mode" class="mode" type="button" aria-pressed="true" hidden>Waves: on</button>
 </div>
 

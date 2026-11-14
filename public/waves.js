@@ -11,8 +11,8 @@
 //
 // The guide: x across the screen, between two open ends just beyond the screen's left and right
 // edges; y along the page (uniform); z deep (uniform, mirror-symmetric about the screen). Inside,
-// the wave equation u_tt = c^2 lap u, the same c for every frequency (set by the knob: the
-// wavelength at 200 Hz in CSS px). Each end sends in a prescribed wave and lets whatever arrives
+// the wave equation u_tt = c^2 lap u, the same c for every frequency (set by
+// WAVELENGTH, the wavelength at 200 Hz in CSS px). Each end sends in a prescribed wave and lets whatever arrives
 // leave. Nothing else is driven: the screen is lit only by light that has come in from the ends.
 //
 // The guide is uniform in y and z, so its light is a sum of modes e^{i(kx x + ky y)} cos(kz z),
@@ -43,7 +43,7 @@
 (() => {
 'use strict';
 
-const WAVELENGTH = 5;      // CSS px: the wavelength at 200 Hz (?wavelength= overrides): the knob
+const WAVELENGTH = 5;      // CSS px: the wavelength at 200 Hz (?wavelength= overrides)
 // The frequencies: visible light at these wavelengths (nm), scaled so that 550 nm is 200 Hz.
 const LAMBDA = [460, 540, 620];
 const F_REF = 200, LAMBDA_REF = 550;
@@ -81,8 +81,6 @@ const canvas = document.getElementById('field');
 const doc = document.getElementById('content');
 const hudText = document.getElementById('hud-text');
 const modeButton = document.getElementById('mode');
-const knob = document.getElementById('knob');
-const knobInput = knob.querySelector('input'), knobOut = knob.querySelector('output');
 const reduce = matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
 
@@ -940,7 +938,6 @@ function layout() {
 function setWaves(on, settledStart) {
   modeButton.setAttribute('aria-pressed', String(on));
   modeButton.textContent = on ? 'Waves: on' : 'Waves: off';
-  knob.hidden = !on;
   try { localStorage.setItem('waves', on ? 'on' : 'off'); } catch (e) { /* not stored */ }
   if (!on) {
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
@@ -956,10 +953,8 @@ function setWaves(on, settledStart) {
     root.classList.remove('live');
     freeResources();
     modeButton.hidden = true;
-    knob.hidden = true;
     return;
   }
-  showWavelength();
   moved = false; lastFrame = 0;
   changeDrive(performance.now(), true);
   if (settledStart || reduce.matches) warmUp();
@@ -971,36 +966,12 @@ function setWaves(on, settledStart) {
   });
 }
 
-// The wavelength slider: a new wavelength is a new field, so the page forms again from nothing.
-function showWavelength() {
-  knobInput.value = String(wavelength);
-  knobOut.textContent = `${R ? Math.round(phys.wl) : wavelength} px`;   // as used (the grid may cap it)
-}
-let knobTimer = 0;
-function setWavelength(v) {
-  wavelength = v;
-  try { localStorage.setItem('wavelength', String(v)); } catch (e) { /* not stored */ }
-  if (!R) return;
-  try { layout(); } catch (e) { console.warn('waves: grid for this wavelength failed', e); return; }
-  moved = false; lastFrame = 0;
-  changeDrive(performance.now(), true);
-  showWavelength();
-  loop();
-}
-
 function start() {
   let on = true;
   try { on = localStorage.getItem('waves') !== 'off'; } catch (e) { /* default on */ }
   modeButton.hidden = false;
   modeButton.addEventListener('click', () => setWaves(!R));
-  let saved = NaN;
-  try { saved = +localStorage.getItem('wavelength'); } catch (e) { /* default */ }
-  wavelength = Math.min(24, Math.max(4, +params.get('wavelength') || saved || WAVELENGTH));
-  knobInput.addEventListener('input', () => {
-    knobOut.textContent = `${knobInput.value} px`;
-    clearTimeout(knobTimer);
-    knobTimer = setTimeout(() => setWavelength(+knobInput.value), 200);
-  });
+  wavelength = Math.min(24, Math.max(4, +params.get('wavelength') || WAVELENGTH));
   setWaves(on, params.has('still'));   // the drive switches on at load
   enableGlide();
 
@@ -1021,7 +992,6 @@ canvas.addEventListener('webglcontextlost', e => {
   root.classList.remove('live');
   R = null;
   modeButton.hidden = true;
-  knob.hidden = true;
 });
 
 (document.fonts ? document.fonts.ready : Promise.resolve())
