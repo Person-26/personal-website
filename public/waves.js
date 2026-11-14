@@ -580,6 +580,7 @@ function paintText(c, h) {
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     if (!/\S/.test(node.data)) continue;
     const el = node.parentElement;
+    if (el.closest('svg')) continue;               // a figure's text: drawn with its figure
     const box = el.getBoundingClientRect();
     if (box.bottom < -40 || box.top > h + 40) continue;
     const cs = getComputedStyle(el);
@@ -600,6 +601,37 @@ function paintText(c, h) {
     }
   }
 }
+
+// Figures (inline svg.figure, coloured with var(--fg), var(--muted), var(--neg) and var(--bg)) are
+// light too: each is drawn into the page as an image of itself in the current colours. A figure
+// whose image cannot be made (or would taint the capture) is shown as it is, over the field.
+const figs = new Map();
+let figKey = '';
+function prepareFigures() {
+  const key = [colors.fgCss, colors.mutedCss, colors.negCss, colors.bgCss].join();
+  if (key === figKey) return Promise.resolve(false);
+  figKey = key;
+  return Promise.all([...doc.querySelectorAll('svg.figure')].map(svg => {
+    const src = svg.outerHTML.replace(/var\(--(fg|muted|neg|bg)\)/g, (_, n) => colors[`${n}Css`]);
+    const img = new Image();
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(src)}`;
+    return img.decode().then(() => {
+      const t = document.createElement('canvas').getContext('2d');
+      t.drawImage(img, 0, 0);
+      t.getImageData(0, 0, 1, 1);
+      figs.set(svg, img);
+      svg.classList.remove('shown');
+    }).catch(() => { figs.delete(svg); svg.classList.add('shown'); });
+  })).then(() => true);
+}
+function paintFigures(c, h) {
+  for (const [svg, img] of figs) {
+    const b = svg.getBoundingClientRect();
+    if (b.bottom < -40 || b.top > h + 40 || !b.width) continue;
+    c.drawImage(img, b.left, b.top, b.width, b.height);
+  }
+}
+
 function stamp(c, text, r, link) {
   if (!r || r.width === 0) return;
   c.fillText(text, r.left, r.top + r.height / 2, r.width + 1);
@@ -618,6 +650,7 @@ function capturePage(row) {
   ctx.beginPath(); ctx.rect(OX, OY, W, H); ctx.clip();
   ctx.setTransform(d, 0, 0, d, OX, OY + (scrollY - row / d) * d);
   paintText(ctx, Ly);
+  paintFigures(ctx, Ly);
   ctx.restore();
   const img = ctx.getImageData(0, 0, FX, FY).data;
   if (!pageBuf || pageBuf.length !== FX * FY * 4) pageBuf = new Float32Array(FX * FY * 4);
@@ -838,8 +871,11 @@ addEventListener('scroll', () => { if (R) { moved = true; loop(); } }, { passive
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (!R) return;
   readColors();
-  changeDrive(performance.now(), true);   // a new palette is a new page
-  loop();
+  prepareFigures().then(() => {
+    if (!R) return;
+    changeDrive(performance.now(), true);   // a new palette is a new page
+    loop();
+  });
 });
 
 // ---------------------------------------------------------------- smooth scrolling
@@ -928,6 +964,11 @@ function setWaves(on, settledStart) {
   changeDrive(performance.now(), true);
   if (settledStart || reduce.matches) warmUp();
   loop();
+  prepareFigures().then(changed => {             // the palette changed while the waves were off
+    if (!changed || !R) return;
+    changeDrive(performance.now(), true);
+    loop();
+  });
 }
 
 // The wavelength slider: a new wavelength is a new field, so the page forms again from nothing.
@@ -983,5 +1024,7 @@ canvas.addEventListener('webglcontextlost', e => {
   knob.hidden = true;
 });
 
-(document.fonts ? document.fonts.ready : Promise.resolve()).then(start);
+(document.fonts ? document.fonts.ready : Promise.resolve())
+  .then(() => { readColors(); return prepareFigures(); })
+  .then(start);
 })();

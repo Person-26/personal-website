@@ -21,6 +21,68 @@
     <h1>How this site is drawn</h1>
     <p>Everything you see here is light, simulated. The screen is a wave field, and the field is a mix of three frequencies: those of blue (460 nm), green (540 nm) and red (620 nm) light, slowed down so that the middle of the visible range would be 200 Hz. Three are enough, as for a laser projector: the eye has only three kinds of colour receptor. Each pixel's colour is what those frequencies look like together: how strongly each one oscillates there, seen through the eye's sensitivity to colour. The white background is all three at once; dark text is where there is no light.</p>
     <p>The screen is the middle of a deep waveguide filled with that field, running from just past the left edge of the screen to just past the right. Every frequency moves at the same speed, so each has its own wavelength. Nothing on the screen is drawn or driven directly. The only input is a boundary condition at the guide's two ends: each end sends in a prescribed wave and lets out whatever reaches it. The light crosses the guide at many angles, up, down and through its depth, and where it passes the middle, its interference is the page: a standing pattern that holds still while the light in it oscillates.</p>
+    <figure class="diagram">
+      <svg class="figure" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" width="720" height="380" role="img" aria-labelledby="guide-title">
+        <title id="guide-title">The waveguide: the screen is its middle plane, between a left and a right end that send light in at a slant</title>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" style="fill: var(--neg)"/>
+          </marker>
+          <marker id="axis" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" style="fill: var(--muted)"/>
+          </marker>
+        </defs>
+        <g style="font: 600 17px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+          <!-- back halves of the ends (z > 0, behind the screen) -->
+          <path d="M180 100 L228 64 L228 254 L180 290 z" style="fill: var(--neg); fill-opacity: 0.18; stroke: var(--neg); stroke-width: 2.5; stroke-linejoin: round"/>
+          <path d="M540 100 L588 64 L588 254 L540 290 z" style="fill: var(--neg); fill-opacity: 0.18; stroke: var(--neg); stroke-width: 2.5; stroke-linejoin: round"/>
+          <!-- the screen: the middle plane z = 0 -->
+          <rect x="180" y="100" width="360" height="190" style="fill: var(--bg); stroke: var(--fg); stroke-width: 3"/>
+          <g style="fill: var(--fg)">
+            <rect x="214" y="132" width="150" height="16"/>
+            <rect x="214" y="166" width="250" height="7" style="fill-opacity: 0.55"/>
+            <rect x="214" y="184" width="270" height="7" style="fill-opacity: 0.55"/>
+            <rect x="214" y="202" width="200" height="7" style="fill-opacity: 0.55"/>
+            <rect x="214" y="232" width="260" height="7" style="fill-opacity: 0.55"/>
+            <rect x="214" y="250" width="120" height="7" style="fill-opacity: 0.55"/>
+          </g>
+          <!-- front halves of the ends (z < 0, in front of the screen) -->
+          <path d="M132 136 L180 100 L180 290 L132 326 z" style="fill: var(--neg); fill-opacity: 0.18; stroke: var(--neg); stroke-width: 2.5; stroke-linejoin: round"/>
+          <path d="M492 136 L540 100 L540 290 L492 326 z" style="fill: var(--neg); fill-opacity: 0.18; stroke: var(--neg); stroke-width: 2.5; stroke-linejoin: round"/>
+          <!-- light sent in from each end, at a slant toward the middle -->
+          <g style="fill: none; stroke: var(--neg); stroke-width: 3; stroke-linecap: round" marker-end="url(#arrow)">
+            <path d="M160 260 L300 150"/>
+            <path d="M205 150 L330 250"/>
+            <path d="M150 190 L290 215"/>
+            <path d="M565 140 L420 230"/>
+            <path d="M515 270 L395 160"/>
+            <path d="M560 200 L430 185"/>
+          </g>
+          <!-- labels -->
+          <g style="fill: var(--fg)" text-anchor="middle">
+            <text x="180" y="30">Left end</text>
+            <text x="540" y="30">Right end</text>
+            <text x="360" y="358">The screen: the middle plane</text>
+          </g>
+          <g style="fill: var(--muted); font-weight: 500; font-size: 15px" text-anchor="middle">
+            <text x="180" y="50">sends light in</text>
+            <text x="540" y="50">sends light in</text>
+          </g>
+          <!-- axes -->
+          <g style="stroke: var(--muted); stroke-width: 2.5; fill: none" marker-end="url(#axis)">
+            <path d="M40 350 L90 350"/>
+            <path d="M40 350 L40 300"/>
+            <path d="M40 350 L72 326"/>
+          </g>
+          <g style="fill: var(--muted); font-weight: 500; font-size: 15px">
+            <text x="96" y="355">x</text>
+            <text x="34" y="292">y</text>
+            <text x="76" y="320">z</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption class="muted">The guide runs in x between its two ends, and goes on up and down (y) and deep (z). The screen is its middle plane. Light comes in only through the ends, at a slant, and its interference in the middle is the page.</figcaption>
+    </figure>
     <p>What each end sends is worked out from the page: for each frequency, which waves must come in from each end to add up to the page in the middle. Only shapes coarser than about half a wavelength can be carried, and only by light that also travels sideways (light running almost straight up or down would take far too long to get in from the ends), so the page is held only approximately, with faint rings and coloured fringes where the three frequencies disagree. The light is slanted toward the middle: the left half of the page is carried mostly from the left end and the right half from the right, and where they meet in the middle there is a faint seam. The guide is uniform, so rather than stepping every point of it forward in time, each wave's journey in from its end is solved exactly: a front at the speed of light, then the wave itself at its slower sideways speed, spreading out as it goes.</p>
     <p>So when the page loads, it is dark, and light comes in from both edges: the most slanted light first, sweeping toward the middle, the rest behind it, until the whole page stands. The ends switch their light on sharply, in a few cycles, so it does not fade in: each front rings, overshooting and settling in bright and dark bands that run ahead of it and trail behind it, a little differently for each colour. When you scroll, the field moves with the page and the ends keep up as it moves: each new line is lit from the moment it comes into view, and its light travels in from the edges while you watch. Light that scrolls off the screen is gone, so scrolling back means waiting for it again. The slider in the corner sets the wavelength at 200 Hz: shorter is sharper, longer is faster.</p>
     <p class="muted"><a href="https://github.com/Person-26/personal-website">Source on GitHub</a></p>

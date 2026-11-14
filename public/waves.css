@@ -81,3 +81,9 @@ sub, sup { font-size: 0.65em; }
 }
 .mode:hover { border-color: var(--neg); }
 .mode:focus-visible { outline: 2px solid var(--neg); outline-offset: 2px; }
+
+/* Diagrams: inline SVG coloured with the page's tokens. In live mode the waves draw them too. */
+.diagram { margin: 1.4em 0; }
+.diagram svg { display: block; width: 100%; height: auto; max-width: 720px; }
+.diagram figcaption { margin-top: 0.6em; font-size: 0.85em; }
+.live main svg.figure:not(.shown) { opacity: 0; }
