@@ -1,46 +1,46 @@
-// The page as light: the slice z = 0 through a scalar wave field in a 3D slab, stepped forward in
-// time, seen the way an eye sees light. The only inputs are boundary conditions.
+// The page as light: the mid-plane z = 0 of a slab of a scalar wave field, seen the way an eye
+// sees light. The only inputs are boundary conditions, on the slab's two faces.
 //
 // The field is three waves, at the frequencies of visible light at 460 nm (blue), 540 nm (green)
 // and 620 nm (red), scaled down so that 550 nm would be 10 Hz: 12.0, 10.2 and 8.9 Hz. Three are
 // enough: the eye has three kinds of colour receptor, so three spectral lines can match any colour
 // on the page, as a laser projector does. Each pixel's colour is what those frequencies look like
-// together: the intensity of each on the slice, weighted by the eye's colour matching functions
-// (CIE 1931, analytic fit) and turned into sRGB. Nothing else sets a colour.
+// together: the intensity of each on the mid-plane, weighted by the eye's colour matching
+// functions (CIE 1931, analytic fit) and turned into sRGB. Nothing else sets a colour.
 //
-// The slab: x, y across the screen and a damping margin around it (open edges: waves leave as
-// if into open space), z from -h to h. Inside, every grid point is a harmonic oscillator coupled
-// to its neighbours, the damped wave equation u_tt = c^2 lap u - gamma u_t, stepped by leapfrog
-// with the 7-point Laplacian, the same c for every frequency, so each has its own wavelength. c
-// is set by the knob, the wavelength at 10 Hz in CSS px. The field is driven only through the
-// boundary condition on the planes z = +-h, where it is prescribed: u = g(x, y, t). The drive is
-// the same on both planes, so the field is mirror-symmetric and only z in [0, h] is stepped.
+// The slab: x, y across the screen (periodic, much wider than the screen's text), z from -h to h,
+// h = DEPTH wavelengths. Everywhere inside, the wave equation u_tt = c^2 lap u, the same c for
+// every frequency (set by the knob: the wavelength at 10 Hz in CSS px). On each face the boundary
+// condition sends in a prescribed wave and lets whatever arrives leave (an open face with an
+// incoming wave). Both faces send the same wave, so the field is mirror-symmetric about z = 0.
+//
+// The slab is uniform, so it is solved exactly, one in-plane pattern q at a time, with FFTs instead
+// of time steps. Pattern q at frequency w crosses the slab as a plane wave tilted by sin(theta) =
+// |q| / k (k = w / c), if |q| < k; finer patterns die out within a wavelength of the face and
+// never reach the middle (so the page can only be held to about half a wavelength). Its envelope
+// crosses at c cos(theta): a change sent in at the faces at time t0 reaches the middle at
+// t0 + h / (c cos(theta)). Head-on patterns (coarse shapes) arrive first, tilted ones (fine detail)
+// later; that is the formation you see, the standing pattern coming into focus. (The envelope
+// is taken to travel undistorted: a slowly varying envelope, accurate since a change takes
+// several periods.)
 //
 // The drive for a page: each frequency w's share of the page (its intensity, the phase free) is
-// fitted within a band of in-plane patterns q. Those coarser than the wavelength cross the slab as
-// waves; finer ones (near field) do not travel but only decay away from the planes, yet the slab
-// is thin enough (h = 2 grid points) that they still reach the slice, so detail finer than the
-// wavelength forms too, down to the grid's own limit. For the discrete scheme the steady state is exact in closed
-// form: with x(q) = 1 + (sigma(q) - W^2) / 2 (sigma the in-plane Laplacian's symbol, W^2 the
-// scheme's own discrete w^2 with damping, over c^2), u_j = g cos(theta j) / cos(theta J) at layer
-// j, cos(theta) = x; so the slice holds the page when g = page x T_J(x), T_J the Chebyshev
-// polynomial. The fit leaves what light really does when made to draw: rings and coloured fringes
-// where the frequencies disagree. A finer grid makes it as close as wanted.
+// fitted with the patterns that can cross (a few rounds of Gerchberg-Saxton, starting from the
+// phase the field already has, so what has not changed stays as it is). The faces then send in
+// exactly the waves that add up to that fit in the middle. The fit leaves what light really does
+// when made to draw: rings and coloured fringes where the frequencies disagree.
 //
-// When the page changes (it loads, or it scrolls and more of it comes into view), the drive fades
-// over to the new page and the field carries on from where it is: the change comes in from the
-// planes: the near field (fine detail) follows the planes at once, the travelling waves
-// (coarse shapes and colour) arrive and ring out across the slab. The field and drive scroll with
-// the page: each stored field remembers the grid row it was made at and is read shifted; what scrolls past an edge leaves.
+// Every page change is kept, as a spectrum, until its slowest pattern has arrived; the middle at
+// time t is, pattern by pattern, the latest change that has reached it. The field scrolls with the
+// page (a shift is a phase factor on the spectrum).
 (() => {
 'use strict';
 
-const WAVELENGTH = 8;      // CSS px: the wavelength at 10 Hz (?wavelength= overrides): the knob
+const WAVELENGTH = 5;      // CSS px: the wavelength at 10 Hz (?wavelength= overrides): the knob
 // The frequencies: visible light at these wavelengths (nm), scaled so that 550 nm is 10 Hz.
 const LAMBDA = [460, 540, 620];
 const F_REF = 10, LAMBDA_REF = 550;
 const FREQ = LAMBDA.map(l => F_REF * LAMBDA_REF / l);
-const OMEGA = FREQ.map(f => 2 * Math.PI * f);
 // Linear sRGB of unit intensity at each frequency (CIE 1931 analytic fit, scaled so all three at
 // unit intensity have unit green), and a non-negative mix of frequencies for each sRGB channel
 // with SEE * MIX = identity: the page's colours split exactly into the frequencies' intensities.
@@ -50,23 +50,18 @@ const SEE = [
   [1.37121, -0.12184, -0.02223],
 ];
 const MIX = [[0.01429, 0.08145, 0.73388], [0.05097, 0.87585, 0.04892], [0.60214, 0.22381, 0.01526], [0, 0, 0]];
-const PPW = 5;             // grid points per wavelength of the finest (blue) light, at least
-const PX = 1;              // grid points per CSS px wanted (the finest detail the page can hold)
-const LAYERS = 2;          // grid layers from the slice to the boundary plane (h = LAYERS points)
-const MAX_CELLS = 3e6;     // grid points in the slab at most (else the wavelength is made longer)
-const BAND = 0.9;          // travelling patterns fitted up to this fraction of each wavenumber ...
-const NEAR = 0.65 * Math.PI;   // ... and near-field ones up to this many radians per grid point
+const DEPTH = 10;          // the slab's half-thickness h, in wavelengths at 10 Hz
+const PPW = 2.5;           // grid points per wavelength of the finest (blue) light
+const MAX_TEXELS = 1 << 20;   // grid points at most (else the wavelength is made longer)
+const BAND = 0.9;          // patterns fitted up to this fraction of each frequency's wavenumber
 const TAPER = 0.75;        // ... rolling off smoothly from this fraction of that
-const GS_ITERS = 6;        // phase-fit iterations per page change
-const ROUGH = 0;          // randomness of the phase the fit starts from where there is no field yet
-const GAMMA = 1.5;         // 1/s: damping; the field settles into a new page over a few 1/GAMMA
-const SETTLE = 8 / GAMMA;  // s: after this, a page counts as standing and stepping stops
-const PAD = 24;            // grid points of damping margin around the screen
-const GAMMA_EDGE = 40;     // 1/s: damping at the outer edge of the margin
-const CFL = 0.5;           // c dt / dx
-const MAX_SUB = 8;         // time steps per frame at most (slower than real time beyond that)
+const GS_ITERS = 6;        // phase-fit rounds per page change
+const RING = 12;           // grid points around the screen left free by the fit
+const RAMP = 0.25;         // s: the faces fade over to a new drive over this
+const MAX_SNAP = 4;        // page changes kept in flight at most
 const STEP_GAP = 220;      // ms: at most one drive change per this interval while scrolling
-const RAMP = 0.4;          // s: a new drive fades in over this (a smooth switch rings less)
+const HT = DEPTH / F_REF;  // s: the head-on crossing time h / c
+const ARRIVE = RAMP + HT / Math.sqrt(1 - BAND * BAND);   // s: until the slowest pattern is in
 
 const root = document.documentElement;
 const canvas = document.getElementById('field');
@@ -77,7 +72,6 @@ const knob = document.getElementById('knob');
 const knobInput = knob.querySelector('input'), knobOut = knob.querySelector('output');
 const reduce = matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
-let maxCells = MAX_CELLS;
 
 let gl = null;
 try {
@@ -86,15 +80,25 @@ try {
 if (!gl || !gl.getExtension('EXT_color_buffer_float')) return;   // the plain HTML page stays
 
 // ---------------------------------------------------------------- shaders
+// The grid (F.x x F.y, powers of two, periodic) holds the screen at off and a free ring around it.
+// Spectra hold two complex numbers per texel: frequencies 2p and 2p + 1 of part p (the fourth is
+// spare).
 const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\nout vec4 o;\n';
 const VS = '#version 300 es\nin vec2 p;\nvoid main(){ gl_Position = vec4(p, 0.0, 1.0); }';
 const CPLX = `
 vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 vec2 cis(float a) { return vec2(cos(a), sin(a)); }`;
-
-// ---- the drive, fitted on the fit grid (F.x x F.y, a power of two at least the slab, periodic;
-// cell (i, j) is the slab's grid point (i, j), margins included). Part p holds frequencies 2p and 2p + 1 (the
-// fourth is spare), each complex.
+// |q| (radians per grid point) of spectral index n, and the band limit for the part's two
+// frequencies.
+const Q = `
+uniform ivec2 F;
+float qlen(ivec2 n) {
+  return length(6.28318531 * vec2(n.x < F.x / 2 ? n.x : n.x - F.x, n.y < F.y / 2 ? n.y : n.y - F.y) / vec2(F));
+}
+vec2 taper(float q, vec2 kc) {
+  vec2 t = clamp((q / kc - ${TAPER}) / (1.0 - ${TAPER}), 0.0, 1.0);
+  return 0.5 + 0.5 * cos(3.14159265 * t);
+}`;
 
 // One radix-2 Stockham pass on two complex numbers per texel.
 const FS_FFT = HEAD + CPLX + `
@@ -108,206 +112,128 @@ void main() {
   int od = ev + size / 2;
   vec4 e = texelFetch(src, horiz == 1 ? ivec2(ev, p.y) : ivec2(p.x, ev), 0);
   vec4 q = texelFetch(src, horiz == 1 ? ivec2(od, p.y) : ivec2(p.x, od), 0);
-  float a = -6.283185307179586 * float(idx % sub) / float(sub);
-  vec2 w = cis(a);
+  vec2 w = cis(-6.283185307179586 * float(idx % sub) / float(sub));
   o = e + vec4(cmul(w, q.xy), cmul(w, q.zw));
 }`;
 
-// The in-plane Laplacian's symbol (grid spacing 1) at fit-grid frequency n: sigma = |q|^2 for
-// coarse patterns.
-const SIGMA = `
-uniform ivec2 F;
-float sigma(ivec2 n) {
-  vec2 q = 6.28318531 * vec2(n.x < F.x / 2 ? n.x : n.x - F.x, n.y < F.y / 2 ? n.y : n.y - F.y) / vec2(F);
-  return 4.0 * (sin(0.5 * q.x) * sin(0.5 * q.x) + sin(0.5 * q.y) * sin(0.5 * q.y));
-}
-vec2 taper(ivec2 n, vec2 kc) {   // raised-cosine band limit, per frequency of the part
-  vec2 t = clamp((sqrt(sigma(n)) / kc - ${TAPER}) / (1.0 - ${TAPER}), 0.0, 1.0);
-  return 0.5 + 0.5 * cos(3.14159265 * t);
-}`;
-
-// Start: each frequency's target amplitude (square root of its share of the page's light) with
-// the phase the field already has on the slice (from the last three steps, as the eye sees it;
-// see FS_SEE), so what has not changed is fitted as it stands and only the rest has to move.
-// Where there is no field yet, a phase pattern fixed to the page (it moves with the text).
+// Start of the fit: each frequency's target amplitude (square root of its share of the page's
+// light) with the phase the field has now, where it is already showing it.
 const FS_GS_INIT = HEAD + CPLX + `
-uniform sampler2D T;           // the page, linear sRGB, on the fit grid
-uniform sampler2DArray U0, U1, U2;   // the field, two steps ago, one ago, now
-uniform ivec2 N;
-uniform int part, row, s0, s1, s2;
-uniform float rough, dt, tb;   // tb: the time one step ago
-uniform vec2 w;                // this part's two frequencies
+uniform sampler2D T, C;        // the page (linear sRGB); the field now (conjugated), made at cs rows ago
+uniform int cs, hasC;
+uniform ivec2 F;
 uniform vec3 share[2];         // this part's two rows of MIX
-float hash(int x, int y, int c) {
-  uint h = uint(x) * 1664525u ^ uint(y) * 22695477u ^ uint(c) * 2654435761u;
-  h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
-  return float(h) / 4294967296.0;
-}
-vec2 at(sampler2DArray s, ivec2 p, int sh) {
-  p.y += sh;
-  if (p.x >= N.x || p.y < 0 || p.y >= N.y) return vec2(0.0);
-  vec3 u = texelFetch(s, ivec3(p, 0), 0).rgb;
-  return part == 0 ? u.rg : vec2(u.b, 0.0);
-}
-vec2 phase(vec2 z, float fallback) {   // weak field: towards the fixed pattern
-  z += 0.05 * cis(rough * 6.2831853 * fallback);
-  return z / length(z);
+// The phase to start from: the field's own where it already has about the right strength (it
+// is showing this page), flat where it does not (dark, or still showing something else).
+vec2 seed(vec2 z, float a) {
+  float m = length(z);
+  float trust = m > 1e-6 ? 1.0 - smoothstep(0.08, 0.25, abs(m - a)) : 0.0;
+  vec2 u = trust * (m > 1e-6 ? z / m : vec2(1.0, 0.0)) + vec2(1.0 - trust + 1e-4, 0.0);
+  return u / length(u);
 }
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
   vec3 t = texelFetch(T, n, 0).rgb;
   float a0 = sqrt(max(dot(share[0], t), 0.0)), a1 = sqrt(max(dot(share[1], t), 0.0));
-  vec2 a = at(U0, n, s0), b = at(U1, n, s1), c = at(U2, n, s2);
-  vec2 ph = w * dt;
-  vec2 x = (c - 2.0 * b + a) / (2.0 * (cos(ph) - 1.0)), y = (c - a) / (2.0 * sin(ph));
-  // the complex amplitude A (u = Re(A e^{-i w t})) is (x + i y) e^{i w tb}
-  vec2 z0 = cmul(vec2(x.x, y.x), cis(w.x * tb)), z1 = cmul(vec2(x.y, y.y), cis(w.y * tb));
-  int yy = n.y + row;
-  o = vec4(a0 * phase(z0, hash(n.x, yy, 2 * part)), a1 * phase(z1, hash(n.x, yy, 2 * part + 1)));
+  vec4 c = vec4(0.0);
+  int y = n.y + cs;
+  if (hasC == 1 && y >= 0 && y < F.y) c = texelFetch(C, ivec2(n.x, y), 0);
+  o = vec4(a0 * seed(vec2(c.x, -c.y), a0), a1 * seed(vec2(c.z, -c.w), a1));
 }`;
-// Keep only the patterns fitted (see the top), conjugated and scaled for the inverse transform.
-const FS_GS_BAND = HEAD + SIGMA + `
+// Keep only the patterns that can cross, conjugated and scaled for the inverse transform.
+const FS_GS_BAND = HEAD + Q + `
 uniform sampler2D X;
 uniform vec2 kc;
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  vec2 w = taper(n, kc) / float(F.x * F.y);
+  vec2 w = taper(qlen(n), kc) / float(F.x * F.y);
   vec4 x = texelFetch(X, n, 0) * vec4(w.x, w.x, w.y, w.y);
   o = vec4(x.x, -x.y, x.z, -x.w);
 }`;
-// Keep that field's phase, put the target amplitude back.
+// Keep that field's phase; put the target amplitude back on the screen, leave the ring free and
+// keep the rest dark.
 const FS_GS_PHASE = HEAD + `
 uniform sampler2D Y, T;
 uniform vec3 share[2];
+uniform ivec4 win;             // the screen: x, y, w, h
+uniform int ring;
 vec2 unit(vec2 z) { float m = length(z); return m > 1e-20 ? z / m : vec2(1.0, 0.0); }
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
   vec4 y = texelFetch(Y, n, 0);
+  vec2 z0 = vec2(y.x, -y.y), z1 = vec2(y.z, -y.w);
+  ivec2 r = max(win.xy - n, n - (win.xy + win.zw - 1));   // > 0 outside the screen
+  int out_ = max(r.x, r.y);
+  if (out_ > ring) { o = vec4(0.0); return; }
+  if (out_ > 0) { o = vec4(z0, z1); return; }
   vec3 t = texelFetch(T, n, 0).rgb;
   float a0 = sqrt(max(dot(share[0], t), 0.0)), a1 = sqrt(max(dot(share[1], t), 0.0));
-  o = vec4(a0 * unit(vec2(y.x, -y.y)), a1 * unit(vec2(y.z, -y.w)));
+  o = vec4(a0 * unit(z0), a1 * unit(z1));
 }`;
-// The fitted slice field's spectrum -> the boundary value that holds it: times T_J(x(q)), from the
-// scheme's own steady state (see the top). Band-limited, conjugated and scaled for the inverse.
-const FS_DRIVE = HEAD + CPLX + SIGMA + `
+// The fitted field's spectrum, band-limited and normalised: what the faces deliver to the middle.
+const FS_STORE = HEAD + Q + `
 uniform sampler2D X;
 uniform vec2 kc;
-uniform vec2 W2re, W2im;       // the scheme's w^2 (with damping) over c^2, per frequency of the part
-uniform int J;
-vec2 cheb(vec2 x) {            // T_J(x), complex
-  vec2 a = vec2(1.0, 0.0), b = x;
-  for (int k = 1; k < 32; k++) { if (k >= J) break; vec2 c = 2.0 * cmul(x, b) - a; a = b; b = c; }
-  return J == 0 ? a : b;
+void main() {
+  ivec2 n = ivec2(gl_FragCoord.xy);
+  vec2 w = taper(qlen(n), kc) / float(F.x * F.y);
+  o = texelFetch(X, n, 0) * vec4(w.x, w.x, w.y, w.y);
+}`;
+
+// The middle now, pattern by pattern: each kept change weighted by how much of it has arrived
+// (and not yet been overtaken by the next), shifted to where the page is now. Conjugated for the
+// inverse transform.
+const FS_COMBINE = HEAD + CPLX + Q + `
+uniform sampler2DArray S;
+uniform int count, fromDark;
+uniform int lay[${MAX_SNAP}], sh[${MAX_SNAP}];
+uniform float age[${MAX_SNAP}];
+uniform vec2 k;                // the part's two wavenumbers, radians per grid point
+uniform float ht, ramp;
+vec2 arrived(float a, vec2 tau) {   // fraction of a change of age a in, after delay tau
+  vec2 x = clamp((a - tau) / ramp, 0.0, 1.0);
+  return 0.5 - 0.5 * cos(3.14159265 * x);
 }
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  float s = sigma(n);
-  vec2 w = taper(n, kc) / float(F.x * F.y);
-  vec4 x = texelFetch(X, n, 0);
-  vec2 g0 = w.x * cmul(x.xy, cheb(vec2(1.0 + 0.5 * (s - W2re.x), -0.5 * W2im.x)));
-  vec2 g1 = w.y * cmul(x.zw, cheb(vec2(1.0 + 0.5 * (s - W2re.y), -0.5 * W2im.y)));
-  o = vec4(g0.x, -g0.y, g1.x, -g1.y);
+  float q = qlen(n);
+  vec2 c = sqrt(max(1.0 - (q / k) * (q / k), 0.0));
+  vec2 tau = ht / max(c, 0.05);
+  vec4 sum = vec4(0.0);
+  for (int j = 0; j < ${MAX_SNAP}; j++) {
+    if (j >= count) break;
+    vec2 w = j == 0 && fromDark == 0 ? vec2(1.0) : arrived(age[j], tau);
+    if (j + 1 < count) w -= arrived(age[j + 1], tau);
+    vec4 d = texelFetch(S, ivec3(n, lay[j]), 0);
+    int m = ((n.y * sh[j]) % F.y + F.y) % F.y;
+    vec2 e = cis(6.28318531 * float(m) / float(F.y));
+    sum += vec4(w.x * cmul(d.xy, e), w.y * cmul(d.zw, e));
+  }
+  o = vec4(sum.x, -sum.y, sum.z, -sum.w);
 }`;
-// Undo the conjugation of the inverse transform.
-const FS_UNCONJ = HEAD + `
+const FS_COPY = HEAD + `
 uniform sampler2D X;
-void main() { vec4 x = texelFetch(X, ivec2(gl_FragCoord.xy), 0); o = vec4(x.x, -x.y, x.z, -x.w); }`;
+void main() { o = texelFetch(X, ivec2(gl_FragCoord.xy), 0); }`;
 
-// ---- the slab (N.x x N.y points across, the screen at PAD..; layers 0 = slice .. J - 1, the
-// boundary plane is layer J).
-
-// The drive on the boundary plane now: fading from the previous page's (D0) to the current one's
-// (D1), each two textures (parts) on the fit grid, read where the page has moved it since.
-const DRIVE = CPLX + `
-uniform sampler2D D0a, D0b, D1a, D1b;
-uniform ivec2 F;
-uniform int pad, dsh0, dsh1;   // rows the page has moved since each drive was made
-uniform float fade, t;
-uniform vec3 w;
-vec3 drive1(sampler2D a, sampler2D b, ivec2 p, int sh) {
-  ivec2 f = ivec2(p.x, p.y + sh);
-  if (f.y < 0 || f.y >= F.y) return vec3(0.0);   // scrolled out of what it was made for
-  vec4 x = texelFetch(a, f, 0); vec2 y = texelFetch(b, f, 0).xy;
-  // Re(G e^{-i w t}) = Re G cos + Im G sin
-  return vec3(x.x, x.z, y.x) * cos(w * t) + vec3(x.y, x.w, y.y) * sin(w * t);
-}
-vec3 driveAt(ivec2 p) {
-  return mix(drive1(D0a, D0b, p, dsh0), drive1(D1a, D1b, p, dsh1), fade);
-}`;
-
-// Fade the drive over: the drive as it is now, into a new pair (at shift 0 from now).
-const FS_BLEND = HEAD + `
-uniform sampler2D A0, A1;      // the same part of the previous and current drives
-uniform ivec2 F;
-uniform int sh0, sh1;
-uniform float fade;
+// What the eye sees: each frequency's intensity, through the colour matching functions, as
+// linear sRGB.
+const FS_SEE = HEAD + `
+uniform sampler2D C0, C1;
+uniform mat3 see;
 void main() {
   ivec2 n = ivec2(gl_FragCoord.xy);
-  int y0 = n.y + sh0, y1 = n.y + sh1;
-  vec4 a = y0 < 0 || y0 >= F.y ? vec4(0.0) : texelFetch(A0, ivec2(n.x, y0), 0);
-  vec4 b = y1 < 0 || y1 >= F.y ? vec4(0.0) : texelFetch(A1, ivec2(n.x, y1), 0);
-  o = mix(a, b, fade);
-}`;
-
-// One leapfrog step of layer j, every frequency (r, g, b = blue, green, red) at once. The two
-// previous levels are read where the page has moved them since they were made.
-const FS_STEP = HEAD + DRIVE + `
-uniform sampler2DArray Up, Uc;
-uniform ivec2 N;
-uniform int j, J, shP, shC;
-uniform float dt, c2, g0, gEdge;
-vec3 U(sampler2DArray s, ivec2 p, int l, int sh) {
-  if (p.x < 0 || p.y < 0 || p.x >= N.x || p.y >= N.y) return vec3(0.0);
-  if (l == J) return driveAt(p);        // the boundary condition (the drives have their own shifts)
-  p.y += sh;
-  if (p.y < 0 || p.y >= N.y) return vec3(0.0);
-  return texelFetch(s, ivec3(p, l < 0 ? -l : l), 0).rgb;   // mirror at the slice
-}
-float damping(ivec2 p) {
-  int d = min(min(p.x, N.x - 1 - p.x), min(p.y, N.y - 1 - p.y));
-  float r = clamp(float(pad - d) / float(pad), 0.0, 1.0);
-  return g0 + gEdge * r * r;
-}
-void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  vec3 uc = U(Uc, p, j, shC), up = U(Up, p, j, shP);
-  vec3 lap = U(Uc, p + ivec2(1, 0), j, shC) + U(Uc, p - ivec2(1, 0), j, shC)
-           + U(Uc, p + ivec2(0, 1), j, shC) + U(Uc, p - ivec2(0, 1), j, shC)
-           + U(Uc, p, j + 1, shC) + U(Uc, p, j - 1, shC) - 6.0 * uc;
-  float g = damping(p);
-  o = vec4((2.0 * uc - (1.0 - 0.5 * g * dt) * up + dt * dt * c2 * lap) / (1.0 + 0.5 * g * dt), 0.0);
-}`;
-
-// What the eye sees on the slice: each frequency's intensity from three successive steps (for
-// u = a cos(w t) + anything slow, the second and central differences give a cos and a sin at the
-// middle step exactly), through the colour matching functions, as linear sRGB.
-const FS_SEE = HEAD + `
-uniform sampler2DArray U0, U1, U2;   // two steps ago, one ago, now
-uniform ivec2 N;
-uniform int s0, s1, s2;
-uniform float dt;
-uniform vec3 w;
-uniform mat3 see;
-vec3 at(sampler2DArray s, ivec2 p, int sh) {
-  p.y += sh;
-  return p.y < 0 || p.y >= N.y ? vec3(0.0) : texelFetch(s, ivec3(p, 0), 0).rgb;
-}
-void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  vec3 a = at(U0, p, s0), b = at(U1, p, s1), c = at(U2, p, s2);
-  vec3 ph = w * dt;
-  vec3 x = (c - 2.0 * b + a) / (2.0 * (cos(ph) - 1.0)), y = (c - a) / (2.0 * sin(ph));
-  o = vec4(see * (x * x + y * y), 0.0);
+  vec4 a = texelFetch(C0, n, 0), b = texelFetch(C1, n, 0);
+  vec3 I = vec3(dot(a.xy, a.xy), dot(a.zw, a.zw), dot(b.xy, b.xy));
+  o = vec4(see * I, 0.0);
 }`;
 
 // The screen: the colour between grid points reconstructed with a Lanczos-3 kernel, then sRGB.
 const FS_DISPLAY = HEAD + `
-uniform sampler2D F;           // linear sRGB on the grid
-uniform ivec2 N;
+uniform sampler2D E0;          // linear sRGB on the grid
+uniform ivec2 F, off;
 uniform vec2 res, cells;       // canvas px; grid points across the screen
-uniform int pad;
 uniform float fy;              // fraction of a grid row the page is past the field
-vec3 E(int x, int y) { return texelFetch(F, clamp(ivec2(x, y), ivec2(0), N - 1), 0).rgb; }
+vec3 E(int x, int y) { return texelFetch(E0, clamp(ivec2(x, y), ivec2(0), F - 1), 0).rgb; }
 float lz(float x) {
   x = abs(x);
   if (x < 1e-4) return 1.0;
@@ -316,7 +242,7 @@ float lz(float x) {
   return 3.0 * sin(p) * sin(p / 3.0) / (p * p);
 }
 void main() {
-  vec2 g = vec2(gl_FragCoord.x / res.x * cells.x, (1.0 - gl_FragCoord.y / res.y) * cells.y + fy) + float(pad) - 0.5;
+  vec2 g = vec2(gl_FragCoord.x / res.x * cells.x, (1.0 - gl_FragCoord.y / res.y) * cells.y + fy) + vec2(off) - 0.5;
   ivec2 i = ivec2(floor(g)); vec2 f = fract(g);
   float wx[6], wy[6], sx = 0.0, sy = 0.0;
   for (int k = 0; k < 6; k++) {
@@ -361,8 +287,8 @@ try {
   };
   P = {
     fft: program(FS_FFT), gsInit: program(FS_GS_INIT), gsBand: program(FS_GS_BAND), gsPhase: program(FS_GS_PHASE),
-    drive: program(FS_DRIVE), unconj: program(FS_UNCONJ), blend: program(FS_BLEND),
-    step: program(FS_STEP), see: program(FS_SEE), disp: program(FS_DISPLAY),
+    store: program(FS_STORE), combine: program(FS_COMBINE), copy: program(FS_COPY),
+    see: program(FS_SEE), disp: program(FS_DISPLAY),
   };
 } catch (e) {
   console.warn('waves: falling back to the plain page', e);
@@ -436,42 +362,41 @@ function run(prog, fbo, w, h, tex, set) {
 }
 
 
+
 // ---------------------------------------------------------------- state
 let Lx = 0, Ly = 0;            // CSS px
-let W = 0, H = 0, Nx = 0, Ny = 0, FX = 0, FY = 0;   // grid points: screen; slab; fit grid
+let W = 0, H = 0, FX = 0, FY = 0, OX = 0, OY = 0;   // grid points: screen; grid; screen offset
 let d = 1;                     // grid points per CSS px
 let wavelength = WAVELENGTH;
-const phys = { c: 0, c2: 0, wl: 0, dt: 0, W2re: [0, 0, 0, 0], W2im: [0, 0, 0, 0], kc: [0, 0, 0, 0] };
+const phys = { wl: 0, k: [0, 0, 0, 0] };
 let R = null;
-let simT = 0;                  // s of simulated time
-let lrow = [0, 0, 0];          // grid row (page scroll) each field level was made at
-let drow = [0, 0];             // ... and the previous and current drives
-let changedAt = -1e9;          // simulated time of the last drive change
+let t = 0;                     // s of time
+let snaps = [];                // page changes in flight, oldest first: { slot, t0, row }
+let fromDark = true;           // the oldest change came in over darkness
+let curRow = 0, hasCur = false;   // the grid row the field now (R.cur) was made at
 let raf = 0, moved = false, lastStep = -1e9, colors = null;
 const SEE_MAT = new Float32Array([SEE[0][0], SEE[1][0], SEE[2][0], SEE[0][1], SEE[1][1], SEE[2][1], SEE[0][2], SEE[1][2], SEE[2][2]]);
 const pow2AtLeast = n => 1 << Math.ceil(Math.log2(Math.max(2, n)));
 
 function freeResources() {
   if (!R) return;
-  for (const r of [R.see, R.page, ...R.fit, ...R.D.flat()]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
-  for (const s of R.U) { gl.deleteTexture(s.t); s.fbos.forEach(f => gl.deleteFramebuffer(f)); }
+  for (const r of [...R.pair, R.page, ...R.cur, R.see]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
+  gl.deleteTexture(R.S.t); R.S.fbos.forEach(f => gl.deleteFramebuffer(f));
   R = null;
 }
 
 function allocate() {
   freeResources();
-  const max = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-  if (Math.max(Nx, Ny, FX, FY) > max) throw new Error('grid too large');
+  if (Math.max(FX, FY) > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('grid too large');
   R = {
-    U: [0, 1, 2].map(() => layers(Nx, Ny, LAYERS, true)),   // the field: one step ago, now, two ago
-    see: target(Nx, Ny, true),                             // what the slice looks like
-    page: target(FX, FY),                                  // the page (linear sRGB) on the fit grid
-    fit: [target(FX, FY), target(FX, FY)],                 // fitting
-    D: [0, 1, 2].map(() => [target(FX, FY), target(FX, FY)]),   // drives: previous, current, spare
+    pair: [target(FX, FY), target(FX, FY)],      // transforms and fitting
+    page: target(FX, FY, true),                  // the page (linear sRGB)
+    cur: [target(FX, FY, true), target(FX, FY, true)],   // the field in the middle now (conjugated)
+    see: target(FX, FY, true),                   // what it looks like (linear sRGB)
+    S: layers(FX, FY, 2 * MAX_SNAP),             // the changes in flight: slot s, part p at 2s + p
   };
-  for (const s of R.U) for (const f of s.fbos) { gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
-  for (const r of R.D.flat()) { gl.bindFramebuffer(gl.FRAMEBUFFER, r.f); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
-  simT = 0; changedAt = -1e9;
+  for (const r of R.cur) { gl.bindFramebuffer(gl.FRAMEBUFFER, r.f); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
+  snaps = []; fromDark = true; hasCur = false; t = 0;
 }
 
 // ---------------------------------------------------------------- page -> drive
@@ -518,15 +443,19 @@ function stamp(c, text, r, link) {
   if (link) c.fillRect(r.left, r.bottom - 1, r.width, 1.4);
 }
 
-// The page scrolled to grid row `row`, linear sRGB, on the fit grid (the slab and its margins; the
-// background beyond).
+// The page scrolled to grid row `row`, linear sRGB, on the grid: the screen at (OX, OY), dark around.
 function capturePage(row) {
   rc.width = FX; rc.height = FY;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = colors.bgCss;
+  ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, FX, FY);
-  ctx.setTransform(d, 0, 0, d, PAD, (scrollY - row / d) * d + PAD);   // the page runs on into the margins
-  paintText(ctx, Ly + PAD / d);
+  ctx.fillStyle = colors.bgCss;
+  ctx.fillRect(OX, OY, W, H);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(OX, OY, W, H); ctx.clip();
+  ctx.setTransform(d, 0, 0, d, OX, OY + (scrollY - row / d) * d);
+  paintText(ctx, Ly);
+  ctx.restore();
   const img = ctx.getImageData(0, 0, FX, FY).data;
   if (!pageBuf || pageBuf.length !== FX * FY * 4) pageBuf = new Float32Array(FX * FY * 4);
   for (let i = 0, n = FX * FY * 4; i < n; i++) pageBuf[i] = LIN[img[i]];
@@ -534,8 +463,9 @@ function capturePage(row) {
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, FX, FY, gl.RGBA, gl.FLOAT, pageBuf);
 }
 
-// Forward FFT in place over the ping-pong pair (FX x FY), starting from pair[a]; the index of the result.
-function fft(pair, a) {
+// Forward FFT in place over the ping-pong pair, starting from pair[a]; the index of the result.
+function fft(a) {
+  const pair = R.pair;
   for (const [horiz, size] of [[1, FX], [0, FY]]) {
     for (let sub = 2; sub <= size; sub *= 2) {
       run(P.fft, pair[1 - a].f, FX, FY, { src: pair[a].t }, u => {
@@ -546,105 +476,76 @@ function fft(pair, a) {
   }
   return a;
 }
+const kcOf = part => [BAND * phys.k[2 * part], BAND * (phys.k[2 * part + 1] || phys.k[2])];
 
-// The boundary value that holds the page (captured at `row`) on the slice, into drive pair `slot`.
+// Fit the page (captured at `row`) and store what the faces must deliver, into slot `slot`.
 function fitDrive(slot, row) {
-  const pair = R.fit, T = R.page.t;
+  const pair = R.pair, T = R.page.t;
   for (let part = 0; part < 2; part++) {
     const share = new Float32Array([...MIX[2 * part], ...MIX[2 * part + 1]]);
-    const kc = [phys.kc[2 * part], phys.kc[2 * part + 1]];
-    run(P.gsInit, pair[0].f, FX, FY, {
-      T, U0: [gl.TEXTURE_2D_ARRAY, R.U[2].t], U1: [gl.TEXTURE_2D_ARRAY, R.U[0].t], U2: [gl.TEXTURE_2D_ARRAY, R.U[1].t],
-    }, u => {
-      gl.uniform1i(u.part, part); gl.uniform1i(u.row, row); gl.uniform3fv(u.share, share);
-      gl.uniform1f(u.rough, +(params.get('rough') ?? ROUGH));
-      gl.uniform2i(u.N, Nx, Ny);
-      gl.uniform1i(u.s0, row - lrow[2]); gl.uniform1i(u.s1, row - lrow[0]); gl.uniform1i(u.s2, row - lrow[1]);
-      gl.uniform1f(u.dt, phys.dt); gl.uniform1f(u.tb, simT - phys.dt);
-      gl.uniform2f(u.w, OMEGA[2 * part], OMEGA[2 * part + 1] || OMEGA[2]);
+    const kc = kcOf(part);
+    run(P.gsInit, pair[0].f, FX, FY, { T, C: R.cur[part].t }, u => {
+      gl.uniform2i(u.F, FX, FY); gl.uniform3fv(u.share, share);
+      gl.uniform1i(u.cs, row - curRow); gl.uniform1i(u.hasC, hasCur ? 1 : 0);
     });
     let a = 0;
     for (let it = 0; it < GS_ITERS; it++) {
-      a = fft(pair, a);
+      a = fft(a);
       run(P.gsBand, pair[1 - a].f, FX, FY, { X: pair[a].t }, u => { gl.uniform2i(u.F, FX, FY); gl.uniform2fv(u.kc, kc); });
-      a = fft(pair, 1 - a);
-      run(P.gsPhase, pair[1 - a].f, FX, FY, { Y: pair[a].t, T }, u => gl.uniform3fv(u.share, share));
+      a = fft(1 - a);
+      run(P.gsPhase, pair[1 - a].f, FX, FY, { Y: pair[a].t, T }, u => {
+        gl.uniform3fv(u.share, share); gl.uniform4i(u.win, OX, OY, W, H); gl.uniform1i(u.ring, RING);
+      });
       a = 1 - a;
     }
-    a = fft(pair, a);
-    run(P.drive, pair[1 - a].f, FX, FY, { X: pair[a].t }, u => {
-      gl.uniform2i(u.F, FX, FY); gl.uniform2fv(u.kc, kc); gl.uniform1i(u.J, LAYERS);
-      gl.uniform2f(u.W2re, phys.W2re[2 * part], phys.W2re[2 * part + 1]);
-      gl.uniform2f(u.W2im, phys.W2im[2 * part], phys.W2im[2 * part + 1]);
-    });
-    a = fft(pair, 1 - a);
-    run(P.unconj, R.D[slot][part].f, FX, FY, { X: pair[a].t });
+    a = fft(a);
+    run(P.store, R.S.fbos[2 * slot + part], FX, FY, { X: pair[a].t }, u => { gl.uniform2i(u.F, FX, FY); gl.uniform2fv(u.kc, kc); });
   }
 }
 
 const rowNow = () => Math.floor(scrollY * d);
-const fadeAt = t => { const x = Math.min(1, Math.max(0, (t - changedAt) / RAMP)); return 0.5 - 0.5 * Math.cos(Math.PI * x); };
+const room = () => FY - H - RING;     // rows a change can scroll before it would wrap round
+const dropOldest = () => { snaps.shift(); fromDark = false; };
 
-// Switch the drive to the page as it is now, fading over from wherever it has got to.
+// The faces switch to the page as it is now.
 function changeDrive(now) {
   const row = rowNow();
-  for (let part = 0; part < 2; part++) {
-    run(P.blend, R.D[2][part].f, FX, FY, { A0: R.D[0][part].t, A1: R.D[1][part].t }, u => {
-      gl.uniform2i(u.F, FX, FY);
-      gl.uniform1i(u.sh0, row - drow[0]); gl.uniform1i(u.sh1, row - drow[1]);
-      gl.uniform1f(u.fade, fadeAt(simT));
-    });
-  }
-  R.D = [R.D[2], R.D[1], R.D[0]];
-  drow[0] = row;
+  if (snaps.length === MAX_SNAP) dropOldest();
+  const used = new Set(snaps.map(s => s.slot));
+  let slot = 0;
+  while (used.has(slot)) slot++;
   capturePage(row);
-  fitDrive(1, row);
-  drow[1] = row;
-  changedAt = simT;
+  fitDrive(slot, row);
+  snaps.push({ slot, t0: t, row });
   lastStep = now;
 }
 
-// Fixed steps: as many as fit the time since the last frame.
-let pending = 0;
-function advance(frame) {
-  const dt = phys.dt;
-  pending += frame;
-  const n = Math.min(MAX_SUB, Math.floor(pending / dt));
-  pending = n === MAX_SUB ? 0 : pending - n * dt;   // too slow: run slower than real time
+// Forget changes that have fully arrived (or scrolled too far to keep).
+function prune() {
   const row = rowNow();
-  for (let k = 0; k < n; k++) {
-    const fade = fadeAt(simT);
-    for (let j = 0; j < LAYERS; j++) {
-      run(P.step, R.U[2].fbos[j], Nx, Ny, {
-        Up: [gl.TEXTURE_2D_ARRAY, R.U[0].t], Uc: [gl.TEXTURE_2D_ARRAY, R.U[1].t],
-        D0a: R.D[0][0].t, D0b: R.D[0][1].t, D1a: R.D[1][0].t, D1b: R.D[1][1].t,
-      }, u => {
-        gl.uniform2i(u.N, Nx, Ny); gl.uniform2i(u.F, FX, FY);
-        gl.uniform1i(u.j, j); gl.uniform1i(u.J, LAYERS); gl.uniform1i(u.pad, PAD);
-        gl.uniform1i(u.shP, row - lrow[0]); gl.uniform1i(u.shC, row - lrow[1]);
-        gl.uniform1i(u.dsh0, row - drow[0]); gl.uniform1i(u.dsh1, row - drow[1]);
-        gl.uniform1f(u.fade, fade); gl.uniform1f(u.t, simT); gl.uniform3fv(u.w, OMEGA);
-        gl.uniform1f(u.dt, dt); gl.uniform1f(u.c2, phys.c2);
-        gl.uniform1f(u.g0, GAMMA); gl.uniform1f(u.gEdge, GAMMA_EDGE);
-      });
-    }
-    // The new level is at time simT + dt (it read the drive at simT for layer J's neighbour).
-    R.U = [R.U[1], R.U[2], R.U[0]];      // one step ago, now, two steps ago
-    lrow = [lrow[1], row, lrow[0]];
-    simT += dt;
-  }
+  while (snaps.length > 1 && (t - snaps[1].t0 > ARRIVE || Math.abs(row - snaps[0].row) > room())) dropOldest();
 }
 
-function see() {
+// The field in the middle now, and what it looks like.
+function render() {
   const row = rowNow();
-  run(P.see, R.see.f, Nx, Ny, {
-    U0: [gl.TEXTURE_2D_ARRAY, R.U[2].t], U1: [gl.TEXTURE_2D_ARRAY, R.U[0].t], U2: [gl.TEXTURE_2D_ARRAY, R.U[1].t],
-  }, u => {
-    gl.uniform2i(u.N, Nx, Ny);
-    gl.uniform1i(u.s0, row - lrow[2]); gl.uniform1i(u.s1, row - lrow[0]); gl.uniform1i(u.s2, row - lrow[1]);
-    gl.uniform1f(u.dt, phys.dt); gl.uniform3fv(u.w, OMEGA);
-    gl.uniformMatrix3fv(u.see, false, SEE_MAT);
-  });
+  const n = snaps.length;
+  const lay = new Int32Array(MAX_SNAP), sh = new Int32Array(MAX_SNAP), age = new Float32Array(MAX_SNAP);
+  snaps.forEach((s, j) => { age[j] = t - s.t0; sh[j] = row - s.row; });
+  for (let part = 0; part < 2; part++) {
+    snaps.forEach((s, j) => { lay[j] = 2 * s.slot + part; });
+    run(P.combine, R.pair[0].f, FX, FY, { S: [gl.TEXTURE_2D_ARRAY, R.S.t] }, u => {
+      gl.uniform2i(u.F, FX, FY);
+      gl.uniform1i(u.count, n); gl.uniform1i(u.fromDark, fromDark ? 1 : 0);
+      gl.uniform1iv(u.lay, lay); gl.uniform1iv(u.sh, sh); gl.uniform1fv(u.age, age);
+      gl.uniform2f(u.k, phys.k[2 * part], phys.k[2 * part + 1] || phys.k[2]);
+      gl.uniform1f(u.ht, HT); gl.uniform1f(u.ramp, RAMP);
+    });
+    const a = fft(0);
+    run(P.copy, R.cur[part].f, FX, FY, { X: R.pair[a].t });
+  }
+  curRow = row; hasCur = true;
+  run(P.see, R.see.f, FX, FY, { C0: R.cur[0].t, C1: R.cur[1].t }, u => gl.uniformMatrix3fv(u.see, false, SEE_MAT));
 }
 
 function hex(v) {
@@ -659,57 +560,45 @@ function readColors() {
 }
 
 function draw() {
-  run(P.disp, null, canvas.width, canvas.height, { F: R.see.t }, u => {
-    gl.uniform2i(u.N, Nx, Ny);
+  run(P.disp, null, canvas.width, canvas.height, { E0: R.see.t }, u => {
+    gl.uniform2i(u.F, FX, FY); gl.uniform2i(u.off, OX, OY);
     gl.uniform2f(u.res, canvas.width, canvas.height);
     gl.uniform2f(u.cells, W, H);
-    gl.uniform1i(u.pad, PAD);
     gl.uniform1f(u.fy, scrollY * d - rowNow());
   });
 }
 
-const settled = () => simT - changedAt > SETTLE;
+const settled = () => snaps.length > 0 && t - snaps[snaps.length - 1].t0 > ARRIVE;
 function hud() {
-  const x = Math.min(1, (simT - changedAt) / SETTLE);
+  const x = snaps.length ? Math.min(1, (t - snaps[snaps.length - 1].t0) / ARRIVE) : 0;
   hudText.textContent =
     `colour = what the eye sees of light at ${LAMBDA.join(', ')} nm, run at ${FREQ.map(f => f.toFixed(1)).join(', ')} Hz · ` +
-    `driven only from planes above and below · wavelength at 10 Hz ${Math.round(phys.wl)} px · ${x >= 1 ? 'standing' : `settling ${Math.round(100 * x)}%`}`;
+    `sent in only from the faces of a slab ${DEPTH * 2} wavelengths thick · wavelength at 10 Hz ${Math.round(phys.wl)} px · ` +
+    `${x >= 1 ? 'standing' : `arriving ${Math.round(100 * x)}%`}`;
 }
 
 // ---------------------------------------------------------------- animation
 function loop() { if (!raf) raf = requestAnimationFrame(tick); }
 
-let lastFrame = 0, slowFrames = 0;
+let lastFrame = 0;
 function tick(now) {
   raf = 0;
   if (!R) return;                             // waves switched off
-  const frame = lastFrame ? Math.min(1 / 30, (now - lastFrame) / 1000) : 1 / 60;
-  if (lastFrame && now - lastFrame < 250) {   // adaptive resolution for slow GPUs
-    slowFrames = now - lastFrame > 30 ? slowFrames + 1 : Math.max(0, slowFrames - 1);
-    if (slowFrames > 24 && Nx * Ny * LAYERS > 4e5) {
-      slowFrames = 0;
-      maxCells = Nx * Ny * LAYERS / 2;
-      layout();
-      changeDrive(now);
-    }
-  }
-  let more = false;
+  t += lastFrame ? Math.min(1 / 30, (now - lastFrame) / 1000) : 1 / 60;
   if (moved && now - lastStep >= STEP_GAP) { changeDrive(now); moved = false; }
-  if (moved) more = true;
-  if (!settled()) advance(frame);
-  see();
+  prune();
+  render();
   draw();
   hud();
-  if (!settled()) more = true;
+  const more = moved || !settled();
   lastFrame = more ? now : 0;
   if (more) loop();
 }
 
-// Start already standing (reduced motion): run the field forward until it has settled.
+// Start already standing (reduced motion): everything has arrived.
 function warmUp() {
-  const steps = Math.ceil(SETTLE / phys.dt);
-  for (let k = 0; k < steps; k += MAX_SUB) advance(MAX_SUB * phys.dt);
-  pending = 0;
+  for (const s of snaps) s.t0 = t - ARRIVE - 1;
+  prune();
 }
 
 addEventListener('scroll', () => { if (R) { moved = true; loop(); } }, { passive: true });
@@ -747,41 +636,31 @@ function enableGlide() {
 }
 
 // The canvas is 100lvh tall, so a phone's URL bar showing or hiding does not resize the box.
-// The grid resolves the finest (blue) light with PPW points per wavelength; if the slab would have
-// too many points, the grid is made coarser (and the wavelength longer, if needed) instead.
+// The grid resolves the finest (blue) light with PPW points per wavelength; if it would have too
+// many points, the wavelength is made longer instead.
 function layout() {
   Lx = canvas.clientWidth; Ly = canvas.clientHeight;
   const dpr = Math.min(devicePixelRatio || 1, 2);
   canvas.width = Math.round(Lx * dpr);
   canvas.height = Math.round(Ly * dpr);
   const blue = wl => wl * F_REF / FREQ[0];                         // blue wavelength, CSS px
-  d = Math.max(PX, PPW / blue(wavelength));
+  d = PPW / blue(wavelength);
   for (;;) {
     W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
-    if ((W + 2 * PAD) * (H + 2 * PAD) * LAYERS <= maxCells || d < 0.05) break;
+    FX = pow2AtLeast(W + 2 * RING); FY = pow2AtLeast(H + 2 * RING);
+    if (FY - H - RING < H / 4) FY *= 2;                            // room to scroll a change
+    if (FX * FY <= MAX_TEXELS || d < 0.05) break;
     d *= 0.95;
   }
   d = W / Lx;
-  Nx = W + 2 * PAD; Ny = H + 2 * PAD;
-  FX = pow2AtLeast(Nx); FY = pow2AtLeast(Ny);
+  OX = (FX - W) >> 1; OY = (FY - H) >> 1;
   const wl = Math.max(wavelength, PPW / d * FREQ[0] / F_REF);
-  const c = wl * F_REF * d;                                         // grid points / s
-  const dt = CFL / c;
-  // Per frequency: the scheme's own w^2 and damping, over c^2 (for the steady state), and the
-  // band limit (past the discrete wavenumber, into the near field).
-  const W2re = [0, 0, 0, 0], W2im = [0, 0, 0, 0], kc = [1, 1, 1, 1];
-  OMEGA.forEach((w, i) => {
-    const wd2 = (2 - 2 * Math.cos(w * dt)) / (dt * dt), wg = Math.sin(w * dt) / dt;
-    W2re[i] = wd2 / (c * c); W2im[i] = GAMMA * wg / (c * c);
-    kc[i] = Math.max(NEAR, BAND * Math.sqrt(W2re[i]));
-  });
-  Object.assign(phys, { wl, c, c2: c * c, dt, W2re, W2im, kc });
+  phys.wl = wl;
+  phys.k = FREQ.map(f => 2 * Math.PI / (wl * F_REF / f * d));     // radians per grid point
   allocate();
-  lrow = [rowNow(), rowNow(), rowNow()];
-  drow = [rowNow(), rowNow()];
 }
 
-// Waves on: the canvas draws the page, formed from scratch by the drive. Off: the plain page,
+// Waves on: the canvas draws the page, sent in from the faces from scratch. Off: the plain page,
 // with the simulation stopped and its GPU memory freed. The choice is remembered.
 function setWaves(on, settledStart) {
   modeButton.setAttribute('aria-pressed', String(on));
