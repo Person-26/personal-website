@@ -30,7 +30,8 @@
 // Arrival, exactly: for each mode, the crossing from an end is a 1D Klein-Gordon problem in x
 // (u_tt = c^2 u_xx - c^2 (k^2 - kx^2) u), whose response to a wave switched on at the end is known
 // (computed here through its spectrum): nothing until the light-speed front, then the wave arriving
-// at its group velocity c |kx| / k, dispersed. It depends only on |kx| / k and the distance from
+// at its group velocity c |kx| / k, dispersed. The ends switch on sharply (RAMP), so the front rings:
+// precursors ahead of it, overshoot and beats behind it, travelling in from the ends. It depends only on |kx| / k and the distance from
 // the end. So the light is split by |kx| / k (NODES smooth bands per end, on a log scale of
 // k / |kx|) and each band is stored as an image; each frame, each band is weighted by its
 // response at each point's distance from its end, and they add up to the field now.
@@ -67,11 +68,12 @@ const GS_ITERS = 8;        // phase-fit rounds for a new page ...
 const GS_ITERS_SCROLL = 3; // ... and for a scrolled one (most of it kept)
 const STEPS = 2;           // steps of a scrolled fit per frame (it is spread over frames)
 const RING = 12;           // grid points around the screen left free by the fit; the ends sit at its edge
-const RAMP = 0.5;          // s: the ends switch a row's light on over this
+const RAMP = 0.04;         // s: the ends switch a row's light on over this (8 cycles at 200 Hz):
+                           // sharp, so the light arrives as a ringing front, not a fade
 const NODES = 8;           // bands of k / |kx| per end
 const LS0 = Math.log(1 / BAND), LS1 = Math.log(1 / GRAZE), DLS = (LS1 - LS0) / (NODES - 1);
-const ND = 128, NA = 512;  // response table: distances 0..tmax; ages 0..amax
-const SETTLE_BLEND = 3;    // s: the response's last slow tail faded out over this, before amax
+const ND = 64, NA = 1024;  // response table: distances 0..tmax; ages from the light-speed front to settled
+const FS = 100;            // Hz: the response is computed at this many samples per s
 const STEP_GAP = 100;      // ms: start a refit at most this often while scrolling
 
 const root = document.documentElement;
@@ -215,9 +217,13 @@ const FS_COMBINE = HEAD + CPLX + `
 uniform sampler2DArray L;      // the bands: layer (part * 2 + side) * NODES + node; row: page row mod hh
 uniform sampler2D E, A;        // the response (this part's two frequencies); each row's age
 uniform int part, base, hh, ww;   // the bands' slot for the window's first row; window size
-uniform float cps, tmax, amax; // light speed (grid points per s); the table's ranges
-vec4 at(int b, float T, float a) {   // the table, bilinear
-  float x = clamp(T / tmax, 0.0, 1.0) * ${ND - 1}.0, y = a / amax * ${NA - 1}.0;
+uniform float cps, tmax, amax; // light speed (grid points per s); distances in the table; all arrived
+uniform float slow[${NODES}], lead[${NODES}], span[${NODES}];   // per band: k / |kx|; the table's ages
+vec4 at(int b, float T, float a) {   // the table, bilinear, by age from the band's group arrival
+  float tau = a - T * slow[b];
+  if (tau <= -lead[b]) return vec4(0.0);
+  if (tau >= span[b]) return vec4(1.0, 0.0, 1.0, 0.0);
+  float x = clamp(T / tmax, 0.0, 1.0) * ${ND - 1}.0, y = (tau + lead[b]) / (lead[b] + span[b]) * ${NA - 1}.0;
   ${LINEAR ? `
   return texture(E, vec2((float(${ND} * b) + x + 0.5) / ${NODES * ND}.0, (y + 0.5) / ${NA}.0));` : `
   int x0 = int(floor(x)), y0 = int(floor(y)); float fx = x - float(x0), fy = y - float(y0);
@@ -398,7 +404,7 @@ let W = 0, H = 0, FX = 0, FY = 0, OX = 0, OY = 0;   // grid points: screen; grid
 let WW = 0, HH = 0;            // the window: the screen and its ring
 let d = 1;                     // grid points per CSS px
 let wavelength = WAVELENGTH;
-const phys = { wl: 0, k: [0, 0, 0, 0], cps: 1, tmax: 1, amax: 1 };
+const phys = { wl: 0, k: [0, 0, 0, 0], cps: 1, tmax: 1, amax: 1, bands: null };
 let R = null;
 let t = 0;                     // s of time
 let fitRow = 0, hasFit = false;   // the page row the last fit was made at
@@ -420,13 +426,23 @@ function freeResources() {
 // ---------------------------------------------------------------- the response from an end
 // For each frequency, band node (|kx| / k = 1 / s) and distance T (in light-seconds, 0..tmax):
 // the field at that distance from an end that switches the mode on over RAMP, relative to its
-// steady state, at ages 0..amax. The mode crosses as a Klein-Gordon wave, kx(w) = sqrt(w^2 -
-// kappa^2) (c = 1, kappa^2 = k^2 - kx^2: its wavenumber across the guide), so
+// steady state. The mode crosses as a Klein-Gordon wave, kx(w) = sqrt(w^2 - kappa^2) (c = 1,
+// kappa^2 = k^2 - kx^2: its wavenumber across the guide), so
 //   E(T, t) = (1 / 2 pi) int R^(W) e^{i (kx(w + W) - kx(w)) T} e^{-i W t} dW,
 // R^ the spectrum of the switch-on; evaluated by FFT (the switch-on made a long pulse, so it
-// is periodic, and read before it ends).
+// is periodic, and read before it ends). Nothing arrives before the light-speed front (t = T);
+// the wave itself comes at the group velocity (t = T s), ringing, its precursors ahead of it.
+// Tabulated by age from the group arrival, tau = t - T s, from the front at the farthest
+// distance (-lead) until it has settled (span), when it is blended into 1.
+const twiddles = {};
 function fftInPlace(re, im, sign) {
   const n = re.length;
+  if (!twiddles[n]) {
+    const c = new Float64Array(n / 2), si = new Float64Array(n / 2);
+    for (let i = 0; i < n / 2; i++) { c[i] = Math.cos(2 * Math.PI * i / n); si[i] = Math.sin(2 * Math.PI * i / n); }
+    twiddles[n] = [c, si];
+  }
+  const [C, S] = twiddles[n];
   for (let i = 1, j = 0; i < n; i++) {
     let bit = n >> 1;
     for (; j & bit; bit >>= 1) j ^= bit;
@@ -434,56 +450,68 @@ function fftInPlace(re, im, sign) {
     if (i < j) { let x = re[i]; re[i] = re[j]; re[j] = x; x = im[i]; im[i] = im[j]; im[j] = x; }
   }
   for (let len = 2; len <= n; len <<= 1) {
-    const a = sign * 2 * Math.PI / len, wr = Math.cos(a), wi = Math.sin(a);
+    const step = n / len, h = len >> 1;
     for (let i = 0; i < n; i += len) {
-      let cr = 1, ci = 0;
-      for (let j = 0; j < len / 2; j++) {
-        const p = i + j, q = p + len / 2;
+      for (let j = 0; j < h; j++) {
+        const cr = C[j * step], ci = sign * S[j * step], p = i + j, q = p + h;
         const xr = re[q] * cr - im[q] * ci, xi = re[q] * ci + im[q] * cr;
         re[q] = re[p] - xr; im[q] = im[p] - xi;
         re[p] += xr; im[p] += xi;
-        const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr;
       }
     }
   }
 }
-function computeResponse(tmax, amax) {
+// Per band: k / |kx|, and the table's ages before and after the group arrival.
+function bandTimes(tmax) {
+  const slow = [], lead = [], span = [];
+  for (let b = 0; b < NODES; b++) {
+    const sb = Math.exp(LS0 + b * DLS);
+    slow.push(sb); lead.push(tmax * (sb - 1) + 0.05); span.push(1.5 + 0.5 * tmax * sb);
+  }
+  return { slow, lead, span };
+}
+function computeResponse(tmax) {
   const ramp = x => x <= 0 ? 0 : x >= RAMP ? 1 : 0.5 - 0.5 * Math.cos(Math.PI * x / RAMP);
-  const DT = 1 / 24;
-  const pulse = amax + 2;
-  const N = pow2AtLeast(Math.ceil((2 * amax + 6) / DT));
-  const Rr = new Float64Array(N), Ri = new Float64Array(N);
-  for (let n = 0; n < N; n++) Rr[n] = (ramp(n * DT) - ramp(n * DT - pulse)) * DT;
-  fftInPlace(Rr, Ri, 1);                               // R^(W_m), W_m = 2 pi m / (N DT)
+  const DT = 1 / FS;
+  const { slow, lead, span } = bandTimes(tmax);
   const tables = [new Float32Array(NODES * ND * NA * 4), new Float32Array(NODES * ND * NA * 4)];
-  const er = new Float64Array(N), ei = new Float64Array(N);
-  const dkr = new Float64Array(N), dki = new Float64Array(N);
-  for (let f = 0; f < 3; f++) {
-    const w = 2 * Math.PI * FREQ[f];
-    const tab = tables[f >> 1], ch = (f & 1) * 2;
-    for (let b = 0; b < NODES; b++) {
-      const kx0 = w * Math.exp(-(LS0 + b * DLS));       // kx at this node
-      const kap2 = w * w - kx0 * kx0;
+  for (let b = 0; b < NODES; b++) {
+    const last = tmax * slow[b] + span[b];             // the latest age needed
+    const pulse = last + 1;
+    const N = pow2AtLeast(Math.ceil((2 * last + 4) * FS));
+    const Rr = new Float64Array(N), Ri = new Float64Array(N);
+    for (let n = 0; n < N; n++) Rr[n] = (ramp(n * DT) - ramp(n * DT - pulse)) * DT;
+    fftInPlace(Rr, Ri, 1);                             // R^(W_m), W_m = 2 pi m / (N DT)
+    const er = new Float64Array(N), ei = new Float64Array(N);
+    const dkr = new Float64Array(N), dki = new Float64Array(N);
+    for (let f = 0; f < 3; f++) {
+      const w = 2 * Math.PI * FREQ[f];
+      const tab = tables[f >> 1], ch = (f & 1) * 2;
+      const kx0 = w / slow[b], kap2 = w * w - kx0 * kx0;
       for (let m = 0; m < N; m++) {                     // kx(w + W) - kx(w), causal branch
         const W = 2 * Math.PI * (m < N / 2 ? m : m - N) / (N * DT), om = w + W;
-        const s = om * om - kap2;
-        if (s >= 0) { dkr[m] = Math.sign(om) * Math.sqrt(s) - kx0; dki[m] = 0; }
-        else { dkr[m] = -kx0; dki[m] = Math.sqrt(-s); }
+        const q = om * om - kap2;
+        if (q >= 0) { dkr[m] = Math.sign(om) * Math.sqrt(q) - kx0; dki[m] = 0; }
+        else { dkr[m] = -kx0; dki[m] = Math.sqrt(-q); }
       }
       for (let iT = 0; iT < ND; iT++) {
         const T = tmax * iT / (ND - 1);
         for (let m = 0; m < N; m++) {
           const mag = Math.exp(-dki[m] * T), ph = dkr[m] * T;
-          const c = mag * Math.cos(ph), s = mag * Math.sin(ph);
-          er[m] = Rr[m] * c - Ri[m] * s; ei[m] = Rr[m] * s + Ri[m] * c;
+          const c = mag * Math.cos(ph), si = mag * Math.sin(ph);
+          er[m] = Rr[m] * c - Ri[m] * si; ei[m] = Rr[m] * si + Ri[m] * c;
         }
         fftInPlace(er, ei, -1);
         const norm = 1 / (N * DT);
         for (let ia = 0; ia < NA; ia++) {
-          const a = amax * ia / (NA - 1), x = a / DT, n0 = Math.min(N - 2, Math.floor(x)), fx = x - n0;
-          let rr = (er[n0] * (1 - fx) + er[n0 + 1] * fx) * norm;
-          let ri = (ei[n0] * (1 - fx) + ei[n0 + 1] * fx) * norm;
-          const fade = Math.min(1, Math.max(0, (a - (amax - SETTLE_BLEND)) / SETTLE_BLEND));
+          const tau = -lead[b] + (lead[b] + span[b]) * ia / (NA - 1), a = T * slow[b] + tau;
+          let rr = 0, ri = 0;
+          if (a > 0) {
+            const x = a / DT, n0 = Math.min(N - 2, Math.floor(x)), fx = x - n0;
+            rr = (er[n0] * (1 - fx) + er[n0 + 1] * fx) * norm;
+            ri = (ei[n0] * (1 - fx) + ei[n0 + 1] * fx) * norm;
+          }
+          const fade = Math.min(1, Math.max(0, (tau - 0.6 * span[b]) / (0.4 * span[b])));
           const sm = fade * fade * (3 - 2 * fade);
           rr += (1 - rr) * sm; ri -= ri * sm;
           const o = ((ia * NODES + b) * ND + iT) * 4 + ch;
@@ -496,8 +524,8 @@ function computeResponse(tmax, amax) {
 }
 let tableKey = '', tableData = null;
 function responseTables() {
-  const key = `${phys.tmax.toFixed(4)} ${phys.amax.toFixed(4)}`;
-  if (key !== tableKey) { tableData = computeResponse(phys.tmax, phys.amax); tableKey = key; }
+  const key = phys.tmax.toFixed(4);
+  if (key !== tableKey) { tableData = computeResponse(phys.tmax); tableKey = key; }
   return tableData.map(data => {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -739,6 +767,7 @@ function render() {
       gl.uniform1i(u.part, part); gl.uniform1i(u.base, mod(row - RING, HH));
       gl.uniform1i(u.hh, HH); gl.uniform1i(u.ww, WW);
       gl.uniform1f(u.cps, phys.cps); gl.uniform1f(u.tmax, phys.tmax); gl.uniform1f(u.amax, phys.amax);
+      gl.uniform1fv(u.slow, phys.bands.slow); gl.uniform1fv(u.lead, phys.bands.lead); gl.uniform1fv(u.span, phys.bands.span);
     });
   }
   run(P.see, R.see.f, WW, HH, { C0: R.cur[0].t, C1: R.cur[1].t }, u => gl.uniformMatrix3fv(u.see, false, SEE_MAT));
@@ -863,7 +892,8 @@ function layout() {
   phys.k = FREQ.map(f => 2 * Math.PI / (wl * F_REF / f * d));     // radians per grid point
   phys.cps = wl * d * F_REF;                                       // light speed, grid points per s
   phys.tmax = WW / phys.cps;                                       // s: light across the window
-  phys.amax = phys.tmax / GRAZE * 1.5 + RAMP + SETTLE_BLEND;       // s: until the slowest band is in
+  phys.bands = bandTimes(phys.tmax);
+  phys.amax = Math.max(...phys.bands.slow.map((sb, b) => phys.tmax * sb + phys.bands.span[b]));   // s: all arrived
   LIT0 = RING + 8;
   lit = new Float64Array(Math.ceil(document.documentElement.scrollHeight * d) + 2 * (H + RING) + 32).fill(NaN);
   allocate();
