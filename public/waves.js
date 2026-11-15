@@ -95,6 +95,7 @@ const canvas = document.getElementById('field');
 const doc = document.getElementById('content');
 const hudText = document.getElementById('hud-text');
 const modeButton = document.getElementById('mode');
+const clickButton = document.getElementById('clicks');   // drag a charge through the field, or not
 const reduce = matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
 // A page may slow its light down (data-slow): time in the field runs that many times slower than
@@ -994,8 +995,18 @@ function wellPath(row) {
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, WELL_N, 4, gl.RGBA, gl.FLOAT, wellBuf);
   return pts.length;
 }
+let clicks = true;
+try { clicks = localStorage.getItem('clicks') !== 'off'; } catch (e) { /* default on */ }
+function setClicks(on) {
+  clicks = on;
+  if (!on) letGo();
+  if (!clickButton) return;
+  clickButton.setAttribute('aria-pressed', String(on));
+  clickButton.textContent = on ? 'Click waves: on' : 'Click waves: off';
+  try { localStorage.setItem('clicks', on ? 'on' : 'off'); } catch (e) { /* not stored */ }
+}
 addEventListener('pointerdown', e => {
-  if (!R || e.button !== 0 || e.pointerType === 'touch' || e.target.closest('a, button, input, label, select, textarea')) return;
+  if (!R || !clicks || e.button !== 0 || e.pointerType === 'touch' || e.target.closest('a, button, input, label, select, textarea')) return;
   e.preventDefault();                            // a drag here moves the well, not a text selection
   held = wellPos = { x: e.clientX, y: e.clientY + scrollY };
   motion.unshift({ ...held, t: e.timeStamp / 1000 });
@@ -1011,11 +1022,11 @@ addEventListener('pointermove', e => {
   held = wellPos = { x: e.clientX, y: e.clientY + scrollY };
   loop();
 });
-const letGo = () => {                            // the well is gone; it stops where it was let go
+function letGo() {                            // the well is gone; it stops where it was let go
   if (!held) return;
   wellPts.unshift({ x: held.x, y: held.y, t, ...current(performance.now() / 1000, held), there: 0 });
   held = null;
-};
+}
 addEventListener('pointerup', letGo);
 // For pages that use the field (the antenna game): the well's light arriving at a point of the
 // page now, as the contributions from each part of its path that reaches it (several, if it was
@@ -1184,6 +1195,7 @@ function layout() {
 function setWaves(on, settledStart) {
   modeButton.setAttribute('aria-pressed', String(on));
   modeButton.textContent = on ? 'Waves: on' : 'Waves: off';
+  if (clickButton) clickButton.hidden = !on;
   try { localStorage.setItem('waves', on ? 'on' : 'off'); } catch (e) { /* not stored */ }
   if (!on) {
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
@@ -1199,6 +1211,7 @@ function setWaves(on, settledStart) {
     root.classList.remove('live');
     freeResources();
     modeButton.hidden = true;
+    if (clickButton) clickButton.hidden = true;
     return;
   }
   moved = false; lastFrame = 0;
@@ -1217,6 +1230,8 @@ function start() {
   try { on = localStorage.getItem('waves') !== 'off'; } catch (e) { /* default on */ }
   modeButton.hidden = false;
   modeButton.addEventListener('click', () => setWaves(!R));
+  if (clickButton) clickButton.addEventListener('click', () => setClicks(!clicks));
+  setClicks(clicks);
   wavelength = Math.min(400, Math.max(4, +params.get('wavelength') || +doc.dataset.wavelength || WAVELENGTH));
   setWaves(on, params.has('still'));   // the drive switches on at load
   enableGlide();
@@ -1238,6 +1253,7 @@ canvas.addEventListener('webglcontextlost', e => {
   root.classList.remove('live');
   R = null;
   modeButton.hidden = true;
+  if (clickButton) clickButton.hidden = true;
 });
 
 (document.fonts ? document.fonts.ready : Promise.resolve())

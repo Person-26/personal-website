@@ -26,7 +26,7 @@ html { scroll-behavior: smooth; }
 body { font: 400 var(--fs)/1.5 'Spectral', Georgia, "Times New Roman", serif; }
 
 /* --ink is the amplitude a piece of text gets in the wave field (1 = full). */
-main { --ink: 1; position: relative; --gutter: clamp(22px, 4vw, 64px); max-width: calc(70ch + 2 * var(--gutter)); margin: 0 auto; padding: 0 var(--gutter) 30vh; }
+main { --ink: 1; position: relative; --gutter: clamp(22px, 4vw, 64px); max-width: calc(40em + 2 * var(--gutter));   /* in em, not ch: the same column whatever the font */ margin: 0 auto; padding: 0 var(--gutter) 30vh; }
 section { padding-block: 14vh 0; }
 .site-nav { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4em 1.4em; padding-block: 28px 0; }
 .site-nav .name { font-weight: 600; margin-right: auto; }
@@ -88,3 +88,24 @@ sub, sup { font-size: 0.65em; }
 .diagram figcaption { margin-top: 0.6em; font-size: 0.85em; }
 .live main svg.figure:not(.shown) { opacity: 0; }
 
+
+.print-only { display: none; }
+
+/* Printed (and the PDF of the CV): the plain page, black on white, without the field or controls. */
+@media print {
+  :root { --bg: #fff; --fg: #000; --muted: #444; --neg: #000; --fs: 10.5pt; color-scheme: light; }
+  #field, .controls, .hud, .site-nav, .download { display: none !important; }
+  html.live main, html.live main * { color: var(--fg); }
+  html.live main .muted, html.live main .muted * { color: var(--muted); }
+  main { max-width: none; padding: 0; }
+  body { line-height: 1.35; }
+  .print-only { display: block; margin: 0 0 0.4em; }
+  .page > h1 { font-size: 24pt; margin: 0 0 0.1em; }
+  .page section, .page section:first-of-type, .page > h1 + section { padding-top: 0.7em; }
+  h2 { font-size: 14pt; margin-bottom: 0.3em; break-after: avoid; }
+  h3 { font-size: 1.05em; }
+  p { margin: 0.15em 0; }
+  .entry { margin-bottom: 0.55em; break-inside: avoid; }
+  a { color: inherit; text-decoration: none; }
+  @page { margin: 14mm 18mm; }
+}
