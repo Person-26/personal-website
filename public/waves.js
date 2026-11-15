@@ -1,6 +1,8 @@
-// The page as light: the middle plane z = 0 of a deep waveguide filled with a scalar wave field,
-// seen the way an eye sees light. The only inputs are boundary conditions, at the guide's left
-// and right ends.
+// The page as light: the plane z = 0 in a slab of uniform medium filled with a scalar wave field,
+// seen the way an eye sees light. The slab lies between two boundary planes (the "ends") just
+// beyond the screen's left and right edges. They are the only inputs, and they are open: each
+// sends light in and lets whatever reaches it leave, so nothing reflects. It is not a waveguide:
+// there are no walls, and the slab is unbounded up, down and in depth.
 //
 // The field is three waves, at the frequencies of visible light at 460 nm (blue), 540 nm (green)
 // and 620 nm (red), scaled down so that 550 nm would be 200 Hz: 239, 204 and 177 Hz. Three are
@@ -9,13 +11,13 @@
 // together: the intensity of each on the middle plane, weighted by the eye's colour matching
 // functions (CIE 1931, analytic fit) and turned into sRGB. Nothing else sets a colour.
 //
-// The guide: x across the screen, between two open ends just beyond the screen's left and right
-// edges; y along the page (uniform); z deep (uniform, mirror-symmetric about the screen). Inside,
+// The slab: x across the screen, between the two ends; y along the page (unbounded, uniform);
+// z deep (unbounded, uniform; the field mirror-symmetric about the screen). Inside,
 // the wave equation u_tt = c^2 lap u, the same c for every frequency (set by
 // WAVELENGTH, the wavelength at 200 Hz in CSS px). Each end sends in a prescribed wave and lets whatever arrives
 // leave. Nothing else is driven: the screen is lit only by light that has come in from the ends.
 //
-// The guide is uniform in y and z, so its light is a sum of modes e^{i(kx x + ky y)} cos(kz z),
+// The medium is uniform in y and z, so its light is a sum of modes e^{i(kx x + ky y)} cos(kz z),
 // each crossing in x at its own sideways wavenumber kx = sqrt(k^2 - ky^2 - kz^2): the left end
 // sends those with kx > 0, the right end those with kx < 0. On the middle plane they add up to any
 // pattern with |q| < k, so the ends can hold the page there (to about half a wavelength), as long
@@ -43,7 +45,8 @@
 (() => {
 'use strict';
 
-const WAVELENGTH = 5;      // CSS px: the wavelength at 200 Hz (?wavelength= overrides)
+const WAVELENGTH = 5;      // CSS px: the wavelength at 200 Hz (a page's data-wavelength, then
+                           // ?wavelength=, override)
 // The frequencies: visible light at these wavelengths (nm), scaled so that 550 nm is 200 Hz.
 const LAMBDA = [460, 540, 620];
 const F_REF = 200, LAMBDA_REF = 550;
@@ -75,7 +78,10 @@ const WELL_N = 192;        // samples of the dragged well's path kept ...
 const WELL_DT = 1 / 80;    // s: ... one per this (so 2.4 s of it: longer than light takes to cross)
 const WELL_R0 = 4;         // grid points: the well's core
 const WELL_GAIN = 1;       // the well's charge: how bright its light is per unit of current / c
-const PITCH = 40;          // the well's motion meets the light at this many times its frequency
+const WELL_DEPTH = 0.35;   // the well's depth: how much of the light at it it scatters (at its core)
+const PITCH = 40;          // the well's motion meets the light at this many times its frequency (on a
+                           // page whose light is slowed by the same factor, data-slow="40", that is
+                           // just the slowed clock: the light's frequency is the hand's own)
 const BELL = 0.1;          // s: the window the shaking is measured over (its bell, in frequency,
                            // 1 / (2 pi BELL) = 1.6 Hz wide: the whole visible range, 3.9-7.2 Hz)
 const BELL_LAG = 2.3 * BELL;   // s: the window's centre, in the past (smooth and causal)
@@ -91,6 +97,11 @@ const hudText = document.getElementById('hud-text');
 const modeButton = document.getElementById('mode');
 const reduce = matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
+// A page may slow its light down (data-slow): time in the field runs that many times slower than
+// real time, so light that is 200 Hz in the field is 200 / SLOW Hz to the viewer, and crosses
+// that much slower.
+const SLOW = Math.max(1, +doc.dataset.slow || 1);
+const CHARGE = +doc.dataset.charge || 1;   // a page may make the well's charge weaker or stronger
 
 let gl = null;
 try {
@@ -258,20 +269,33 @@ void main() {
 }`;
 
 // What the eye sees: each frequency's intensity, through the colour matching functions, as
-// linear sRGB. First, the dragged well's light. The well, where the pointer is held, is a charge,
+// linear sRGB: averaged over its cycle, since the eye cannot follow 200 Hz, except where the light
+// is slowed (data-slow) to a few Hz, which the eye can follow: there, its square as it is now, so
+// its crests and troughs are seen moving. First, the dragged well's light. The well, where the pointer is held, is a charge,
 // and moving it is a current, J = q v. A current radiates only at the frequencies it has: shaken
 // at f, the well shines at PITCH f, a wavelength the eye sees as some colour, through the same
 // colour matching functions as everything else (so their overlap is the eye's); that colour is
 // carried by the three frequencies here in the mix that looks the same. Standing still or
-// dragged steadily it has no such frequency, and outside the visible range none the eye sees. Each point gets the light from where the well was when it left
-// (|x - s(t')| = c (t - t'), every root summed: shaken faster than light, there are several), as
-// from an antenna: the part of J across the line to it (strongest sideways to the shaking),
-// falling off as 1/sqrt(r), since the well runs through the guide's depth, a line source.
+// dragged steadily it has no such frequency, and outside the visible range none the eye sees.
+// Each point gets the light from where the well was when it left (|x - s(t')| = c (t - t'),
+// every root summed: shaken faster than light, there are several), as from an antenna: the part
+// of J across the line to it (strongest sideways to the shaking), falling off as 1/sqrt(r), since
+// the well runs through the medium's depth, a line source.
+// The well is also a dip in the medium, so, moving or not, it scatters the light passing through
+// it (to first order: Born): it sends on the page's light at its position, at the same frequency,
+// as an outgoing wave (the 2D one: e^{i(kr + pi/4)} / sqrt(r)). The ends are not refitted for it,
+// so the page is disturbed around it: rings, and a shadow downstream. Taken where the well was
+// when the light left, as the rest, the scattering of a moving well is Doppler-shifted exactly:
+// the light's phase along its path and the changing distance are both in it. (The shifted light is
+// still shown in its own frequency's colour.) Let go, the well is gone; its last light moves on.
 const FS_SEE = HEAD + CPLX + `
 uniform sampler2D C0, C1, WT;   // WT: the well's path, newest first: row 0 window x, y (grid
-                                // points), age (s); rows 1-3 per frequency, J (complex x, y)
+                                // points), age (s), there (1) or not (0); rows 1-3 per
+                                // frequency, J (complex x, y)
 uniform mat3 see;
 uniform int nw;
+uniform float inst;             // 1: show the field as it is now, not its average (slowed light)
+uniform vec3 wt;                // per frequency: its phase now, omega t (mod 2 pi)
 uniform vec3 kf;                // per frequency: radians per grid point
 uniform float cps;
 void main() {
@@ -290,7 +314,7 @@ void main() {
         vec2 s = mix(p.xy, q.xy, u);
         float r = length(x - s);
         vec2 dir = (x - s) / max(r, 1e-3), side = vec2(-dir.y, dir.x);
-        float g = ${WELL_GAIN.toFixed(2)} / cps * sqrt(${WELL_R0.toFixed(1)} / max(r, ${WELL_R0.toFixed(1)}));
+        float g = ${(WELL_GAIN * CHARGE).toFixed(4)} / cps * sqrt(${WELL_R0.toFixed(1)} / max(r, ${WELL_R0.toFixed(1)}));
         vec2 j[3];
         for (int c = 0; c < 3; c++) {
           vec4 J = mix(texelFetch(WT, ivec2(i, c + 1), 0), texelFetch(WT, ivec2(i + 1, c + 1), 0), u);
@@ -299,11 +323,24 @@ void main() {
         a.xy += cmul(j[0], cis(kf.x * r));
         a.zw += cmul(j[1], cis(kf.y * r));
         b.xy += cmul(j[2], cis(kf.z * r));
+        float there = mix(p.w, q.w, u);
+        if (there > 0.0) {                         // the light it scattered then, from there
+          ivec2 m = clamp(ivec2(floor(s + 0.5)), ivec2(0), textureSize(C0, 0) - 1);
+          vec4 ua = texelFetch(C0, m, 0); vec2 ub = texelFetch(C1, m, 0).xy;
+          float h = ${WELL_DEPTH.toFixed(3)} * there * sqrt(${WELL_R0.toFixed(1)} / max(r, ${WELL_R0.toFixed(1)}));
+          a.xy += h * cmul(ua.xy, cis(kf.x * r + 0.785398));
+          a.zw += h * cmul(ua.zw, cis(kf.y * r + 0.785398));
+          b.xy += h * cmul(ub, cis(kf.z * r + 0.785398));
+        }
       }
       p = q; f0 = f1;
     }
   }
   vec3 I = vec3(dot(a.xy, a.xy), dot(a.zw, a.zw), dot(b.xy, b.xy));
+  if (inst > 0.5) {                               // its square now, Re(phasor e^{-i omega t})^2, x2
+    vec3 r = vec3(dot(a.xy, cis(-wt.x) * vec2(1.0, -1.0)), dot(a.zw, cis(-wt.y) * vec2(1.0, -1.0)), dot(b.xy, cis(-wt.z) * vec2(1.0, -1.0)));
+    I = 2.0 * r * r;
+  }
   o = vec4(see * I, 0.0);
 }`;
 
@@ -471,7 +508,7 @@ function freeResources() {
 // For each frequency, band node (|kx| / k = 1 / s) and distance T (in light-seconds, 0..tmax):
 // the field at that distance from an end that switches the mode on over RAMP, relative to its
 // steady state. The mode crosses as a Klein-Gordon wave, kx(w) = sqrt(w^2 - kappa^2) (c = 1,
-// kappa^2 = k^2 - kx^2: its wavenumber across the guide), so
+// kappa^2 = k^2 - kx^2: its wavenumber along y and z), so
 //   E(T, t) = (1 / 2 pi) int R^(W) e^{i (kx(w + W) - kx(w)) T} e^{-i W t} dW,
 // R^ the spectrum of the switch-on; evaluated by FFT (the switch-on made a long pulse, so it
 // is periodic, and read before it ends). Nothing arrives before the light-speed front (t = T);
@@ -625,6 +662,7 @@ function paintText(c, h) {
     if (!/\S/.test(node.data)) continue;
     const el = node.parentElement;
     if (el.closest('svg')) continue;               // a figure's text: drawn with its figure
+    if (el.closest('.solid')) continue;            // drawn as it is, not in light
     const box = el.getBoundingClientRect();
     if (box.bottom < -40 || box.top > h + 40) continue;
     const cs = getComputedStyle(el);
@@ -851,6 +889,8 @@ function render() {
   run(P.see, R.see.f, WW, HH, { C0: R.cur[0].t, C1: R.cur[1].t, WT: wellTex }, u => {
     gl.uniformMatrix3fv(u.see, false, SEE_MAT);
     gl.uniform1i(u.nw, nw);
+    gl.uniform1f(u.inst, SLOW > 1 ? 1 : 0);
+    gl.uniform3f(u.wt, ...FREQ.map(f => (2 * Math.PI * ((f * t) % 1))));
     gl.uniform3f(u.kf, phys.k[0], phys.k[1], phys.k[2]);
     gl.uniform1f(u.cps, phys.cps);
   });
@@ -899,6 +939,7 @@ function demodAt(now, pts) {
   const z = [0, 0, 0, 0];
   for (let i = 0; i + 1 < pts.length; i++) {
     const p = pts[i], q = pts[i + 1], dt = p.t - q.t;
+    if (q.t < now - 2 * BELL_LAG - TURN - 0.05) break;   // the window is over (newest first)
     if (dt <= 0 || q.t > now) continue;
     const vx = (p.x - q.x) / dt, vy = (p.y - q.y) / dt, s = (p.t + q.t) / 2;
     const w = Math.exp(-((now - s - BELL_LAG) ** 2) / (2 * BELL * BELL)) * dt * 2 / BELL_SUM;
@@ -908,38 +949,46 @@ function demodAt(now, pts) {
   return z;
 }
 const TURN = 0.02;               // s: the frequency from the phase's turn over this
+const MOTION_KEEP = 4;           // s of the well's motion kept (for what it drives far away, later)
 function current(now, at) {
   const pts = [{ x: at.x, y: at.y, t: now }, ...motion];
   const z = demodAt(now, pts), [a, b, c, e] = demodAt(now - TURN, pts);
   const mag = Math.hypot(...z);
-  if (!(mag > 0)) return [0, 1, 2].map(() => [0, 0, 0, 0]);
+  if (!(mag > 0)) return { J: [0, 1, 2].map(() => [0, 0, 0, 0]), Z: [0, 0, 0, 0], f: OMEGA_MID / (2 * Math.PI) };
   const re = a * z[0] + b * z[1] + c * z[2] + e * z[3], im = a * z[1] - b * z[0] + c * z[3] - e * z[2];
   const omega = OMEGA_MID - Math.atan2(im, re) / TURN;      // z turns at -(omega - OMEGA_MID)
   const nm = LAMBDA_REF * F_REF / (PITCH * omega / (2 * Math.PI));
   const bell = Math.exp(-(((omega - OMEGA_MID) * BELL) ** 2) / 2);   // the window's response there
   const amp = mag / Math.max(bell, 0.2);
-  return lineMix(nm).map(I => z.map(v => v / mag * amp * Math.sqrt(I)));
+  return {
+    J: lineMix(nm).map(I => z.map(v => v / mag * amp * Math.sqrt(I))),   // per frequency here
+    Z: z.map(v => v / mag * amp),                // the current itself (CSS px/s), complex x, y
+    f: omega / (2 * Math.PI),                    // Hz, real time: how fast it is shaken
+  };
 }
 const strength = J => Math.max(...J.map(j => Math.hypot(...j)));
 // Bring the well's path up to now and into the texture; the number of path points to use.
 function wellPath(row) {
   if (!wellPos) return 0;
   const at = held || wellPos, now = performance.now() / 1000;
-  motion = motion.filter(p => now - p.t <= 2 * BELL_LAG + 0.05);
-  const J = current(now, at);
+  motion = motion.filter(p => now - p.t <= MOTION_KEEP);
+  const { J, Z, f } = current(now, at);
   const reach = Math.hypot(WW, HH) / phys.cps + 0.2;
-  if (!wellPts.length || t - wellPts[0].t >= WELL_DT || t < wellPts[0].t) wellPts.unshift({ x: at.x, y: at.y, t, J });
+  const there = held ? 1 : 0;
+  const step = Math.max(WELL_DT / SLOW, reach / (WELL_N - 2));   // field s: enough to span reach
+  if (!wellPts.length || t - wellPts[0].t >= step || t < wellPts[0].t) wellPts.unshift({ x: at.x, y: at.y, t, J, Z, f, there });
   wellPts = wellPts.filter(p => p.t <= t && t - p.t < reach).slice(0, WELL_N - 1);
+  shaking = { f, Z };
   const quiet = 1e-3 * phys.wl * F_REF;          // a current too weak to see (CSS px/s)
-  const lit = wellPts.some(p => strength(p.J) > quiet) || strength(J) > quiet;
+  const lit = held || wellPts.some(p => p.there || strength(p.J) > quiet) || strength(J) > quiet;
   if (!lit) {
-    if (!held && !motion.length) { wellPos = null; wellPts = []; }
+    if (!motion.length) { wellPos = null; wellPts = []; }
     return 0;
   }
-  const pts = [{ x: at.x, y: at.y, t, J }, ...wellPts];
+  const pts = [{ x: at.x, y: at.y, t, J, Z, f, there }, ...wellPts];
   pts.forEach((p, i) => {
-    wellBuf.set([p.x * d + RING - 0.5, p.y * d - row + RING - 0.5, t - p.t, 0], i * 4);
-    for (let f = 0; f < 3; f++) wellBuf.set(p.J[f].map(v => v * d), ((f + 1) * WELL_N + i) * 4);   // grid points / s
+    wellBuf.set([p.x * d + RING - 0.5, p.y * d - row + RING - 0.5, t - p.t, p.there], i * 4);
+    for (let f = 0; f < 3; f++) wellBuf.set(p.J[f].map(v => v * d * SLOW), ((f + 1) * WELL_N + i) * 4);   // grid points per field s
   });
   gl.bindTexture(gl.TEXTURE_2D, wellTex);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, WELL_N, 4, gl.RGBA, gl.FLOAT, wellBuf);
@@ -962,8 +1011,51 @@ addEventListener('pointermove', e => {
   held = wellPos = { x: e.clientX, y: e.clientY + scrollY };
   loop();
 });
-const letGo = () => { held = null; };            // it stays where it was let go
+const letGo = () => {                            // the well is gone; it stops where it was let go
+  if (!held) return;
+  wellPts.unshift({ x: held.x, y: held.y, t, ...current(performance.now() / 1000, held), there: 0 });
+  held = null;
+};
 addEventListener('pointerup', letGo);
+// For pages that use the field (the antenna game): the well's light arriving at a point of the
+// page now, as the contributions from each part of its path that reaches it (several, if it was
+// shaken faster than light): the phasor of the field there, re and im (white's amplitude = 1),
+// and the frequency it was shaken at (real Hz). The light's speed, CSS px per real second.
+let shaking = { f: 0, Z: [0, 0, 0, 0] };
+window.wavesField = {
+  live: () => !!R,
+  // The well's motion, newest first, real s and page CSS px (with where it is now, if held), and
+  // what turns it into light: its field at distance r, across the line to there, is
+  // gain / speed * sqrt(core / max(r, core)) times its velocity there when the light left.
+  motion: () => (held ? [{ x: held.x, y: held.y, t: performance.now() / 1000 }, ...motion] : motion),
+  gain: () => WELL_GAIN * CHARGE,
+  core: () => WELL_R0 / d,
+  speed: () => phys.wl * F_REF / SLOW,
+  shaking: () => ({ f: shaking.f, strength: Math.hypot(...shaking.Z) }),
+  at(x, y) {
+    if (!R || !wellPos || wellPts.length < 2) return [];
+    const c = phys.wl * F_REF, r0 = WELL_R0 / d;   // CSS px per field s; the core, CSS px
+    const pts = [{ ...(held || wellPos), t, ...current(performance.now() / 1000, held || wellPos) }, ...wellPts];
+    const out = [];
+    let f0 = Math.hypot(x - pts[0].x, y - pts[0].y);
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const p = pts[i], q = pts[i + 1];
+      const f1 = Math.hypot(x - q.x, y - q.y) - c * (t - q.t);
+      if (f0 >= 0 && f1 < 0) {
+        const u = f0 / (f0 - f1), sx = p.x + (q.x - p.x) * u, sy = p.y + (q.y - p.y) * u;
+        const r = Math.hypot(x - sx, y - sy), dx = (x - sx) / Math.max(r, 1e-3), dy = (y - sy) / Math.max(r, 1e-3);
+        const Z = p.Z.map((v, k) => v + (q.Z[k] - v) * u), f = p.f + (q.f - p.f) * u;
+        const g = WELL_GAIN * CHARGE / c * SLOW * Math.sqrt(r0 / Math.max(r, r0));   // (Z is per real s)
+        const jr = Z[0] * -dy + Z[2] * dx, ji = Z[1] * -dy + Z[3] * dx;    // across the line to here
+        const k = 2 * Math.PI * f * PITCH / c;      // rad per CSS px: the light's own wavenumber
+        const ph = k * r;
+        out.push({ re: g * (jr * Math.cos(ph) - ji * Math.sin(ph)), im: g * (jr * Math.sin(ph) + ji * Math.cos(ph)), f });
+      }
+      f0 = f1;
+    }
+    return out;
+  },
+};
 addEventListener('pointercancel', letGo);
 addEventListener('blur', letGo);
 
@@ -1000,7 +1092,7 @@ function arrived() {
 function hud(x) {
   hudText.textContent =
     `colour = what the eye sees of light at ${LAMBDA.join(', ')} nm, run at ${FREQ.map(f => Math.round(f)).join(', ')} Hz · ` +
-    `sent in only from the left and right ends of a deep waveguide · wavelength at ${F_REF} Hz ${Math.round(phys.wl)} px · ` +
+    `sent in only from open boundaries at the left and right · wavelength at ${F_REF} Hz ${Math.round(phys.wl)} px · ` +
     `${x >= 1 ? 'standing' : `arriving ${Math.round(100 * x)}%`}`;
 }
 
@@ -1011,14 +1103,14 @@ let lastFrame = 0;
 function tick(now) {
   raf = 0;
   if (!R) return;                             // waves switched off
-  t += lastFrame ? Math.min(1 / 30, (now - lastFrame) / 1000) : 1 / 60;
+  t += (lastFrame ? Math.min(1 / 30, (now - lastFrame) / 1000) : 1 / 60) / SLOW;
   if (job) stepJob(STEPS);
   else if (moved && now - lastStep >= STEP_GAP) { changeDrive(now, false); moved = false; stepJob(STEPS); }
   render();
   draw();
   const x = arrived();
   hud(x);
-  const more = moved || job || x < 1 || wellPos !== null;
+  const more = moved || job || x < 1 || wellPos !== null;   // (slowed light: the well's waves)
   lastFrame = more ? now : 0;
   if (more) loop();
 }
@@ -1125,7 +1217,7 @@ function start() {
   try { on = localStorage.getItem('waves') !== 'off'; } catch (e) { /* default on */ }
   modeButton.hidden = false;
   modeButton.addEventListener('click', () => setWaves(!R));
-  wavelength = Math.min(24, Math.max(4, +params.get('wavelength') || WAVELENGTH));
+  wavelength = Math.min(400, Math.max(4, +params.get('wavelength') || +doc.dataset.wavelength || WAVELENGTH));
   setWaves(on, params.has('still'));   // the drive switches on at load
   enableGlide();
 

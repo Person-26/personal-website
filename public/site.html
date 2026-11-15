@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>This site · Perry Cai</title>
-<meta name="description" content="How this site is drawn: the middle of a 3D waveguide, lit only from its left and right ends.">
+<meta name="description" content="How this site is drawn: a plane of light in open space, lit only from two boundaries at its left and right.">
 <link rel="stylesheet" href="/waves.css">
 </head>
 <body>
@@ -19,10 +19,10 @@
   </nav>
   <section id="how">
     <h1>How this site is drawn</h1>
-    <p>Everything you see here is simulated light. The screen is the middle of a waveguide, a slab of space between two ends just past the left and right edges of the window. Nothing on the screen is drawn directly: the only input is the light each end sends in. Where that light crosses in the middle, it interferes into the page.</p>
+    <p>Everything you see here is simulated light. The screen is a plane in open space, between two boundaries just past the left and right edges of the window. Nothing on the screen is drawn directly: the only input is the light each boundary sends in, and nothing reflects off them. Where that light crosses in the middle, it interferes into the page.</p>
     <figure class="diagram">
-      <svg class="figure" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" width="720" height="380" role="img" aria-labelledby="guide-title">
-        <title id="guide-title">The waveguide: the screen is its middle plane, between a left and a right end that send light in at a slant</title>
+      <svg class="figure" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" width="720" height="380" role="img" aria-labelledby="diagram-title">
+        <title id="diagram-title">The screen is a plane between a left and a right boundary that send light in at a slant</title>
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0 0 L10 5 L0 10 z" style="fill: var(--neg)"/>
@@ -32,7 +32,7 @@
           </marker>
         </defs>
         <g style="font: 600 17px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
-          <!-- back halves of the ends (z > 0, behind the screen) -->
+          <!-- back halves of the boundaries (z > 0, behind the screen) -->
           <path d="M180 100 L228 64 L228 254 L180 290 z" style="fill: var(--neg); fill-opacity: 0.18; stroke: var(--neg); stroke-width: 2.5; stroke-linejoin: round"/>
           <path d="M540 100 L588 64 L588 254 L540 290 z" style="fill: var(--neg); fill-opacity: 0.18; stroke: var(--neg); stroke-width: 2.5; stroke-linejoin: round"/>
           <!-- the screen: the middle plane z = 0 -->
@@ -45,10 +45,10 @@
             <rect x="214" y="232" width="260" height="7" style="fill-opacity: 0.55"/>
             <rect x="214" y="250" width="120" height="7" style="fill-opacity: 0.55"/>
           </g>
-          <!-- front halves of the ends (z < 0, in front of the screen) -->
+          <!-- front halves of the boundaries (z < 0, in front of the screen) -->
           <path d="M132 136 L180 100 L180 290 L132 326 z" style="fill: var(--neg); fill-opacity: 0.18; stroke: var(--neg); stroke-width: 2.5; stroke-linejoin: round"/>
           <path d="M492 136 L540 100 L540 290 L492 326 z" style="fill: var(--neg); fill-opacity: 0.18; stroke: var(--neg); stroke-width: 2.5; stroke-linejoin: round"/>
-          <!-- light sent in from each end, at a slant toward the middle -->
+          <!-- light sent in from each boundary, at a slant toward the middle -->
           <g style="fill: none; stroke: var(--neg); stroke-width: 3; stroke-linecap: round" marker-end="url(#arrow)">
             <path d="M160 260 L300 150"/>
             <path d="M205 150 L330 250"/>
@@ -59,8 +59,8 @@
           </g>
           <!-- labels -->
           <g style="fill: var(--fg)" text-anchor="middle">
-            <text x="180" y="30">Left end</text>
-            <text x="540" y="30">Right end</text>
+            <text x="180" y="30">Left boundary</text>
+            <text x="540" y="30">Right boundary</text>
             <text x="360" y="358">The screen: the middle plane</text>
           </g>
           <g style="fill: var(--muted); font-weight: 500; font-size: 15px" text-anchor="middle">
@@ -80,9 +80,9 @@
           </g>
         </g>
       </svg>
-      <figcaption class="muted">Light enters only through the two ends, at a slant. The guide goes on up and down (y) and deep (z).</figcaption>
+      <figcaption class="muted">Light enters only through the two boundaries, at a slant, and leaves through them without reflecting. Space goes on up and down (y) and deep (z).</figcaption>
     </figure>
-    <p>The light is three frequencies, blue, green and red, which is enough for the eye, as in a laser projector. What each end must send is worked out from the page, but light can only carry shapes larger than about half a wavelength, so you'll see faint rings and coloured fringes. When a page loads or you scroll, the light has to travel in from the edges, so the page forms from the sides inward. Hold the mouse button down anywhere to put a charge in the guide there. Moving it makes a current, but a current only shines at the frequencies it has, so the charge stays dark unless you shake it at about 4 to 6 times a second (sped up 40 times, that is the light's frequency): slower for red, faster for blue.</p>
+    <p>The light is three frequencies, blue, green and red, which is enough for the eye, as in a laser projector. What each boundary must send is worked out from the page, but light can only carry shapes larger than about half a wavelength, so you'll see faint rings and coloured fringes. When a page loads or you scroll, the light has to travel in from the edges, so the page forms from the sides inward. Hold the mouse button down anywhere to put a charge there. Moving it makes a current, but a current only shines at the frequencies it has, so the charge stays dark unless you shake it at about 4 to 6 times a second (sped up 40 times, that is the light's frequency): slower for red, faster for blue.</p>
     <p class="muted"><a href="https://github.com/Person-26/personal-website">Source on GitHub</a></p>
   </section>
 </main>
