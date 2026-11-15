@@ -84,7 +84,9 @@ const PITCH = 40;          // the well's motion meets the light at this many tim
                            // just the slowed clock: the light's frequency is the hand's own)
 const BELL = 0.1;          // s: the window the shaking is measured over (its bell, in frequency,
                            // 1 / (2 pi BELL) = 1.6 Hz wide: the whole visible range, 3.9-7.2 Hz)
-const BELL_LAG = 2.3 * BELL;   // s: the window's centre, in the past (smooth and causal)
+const WIN_A = BELL / Math.sqrt(3);   // s: the window is one-sided, tau^2 e^(-tau / WIN_A) at age tau:
+                           // as wide in frequency as that bell, but weighted toward now (it lags
+                           // ~0.15 s, where a symmetric bell kept causal lags 0.23 s)
 const LS0 = Math.log(1 / BAND), LS1 = Math.log(1 / GRAZE), DLS = (LS1 - LS0) / (NODES - 1);
 const ND = 64, NA = 1024;  // response table: distances 0..tmax; ages from the light-speed front to settled
 const FS = 100;            // Hz: the response is computed at this many samples per s
@@ -922,7 +924,6 @@ function lineMix(l) {
   return SEE_INV.map(r => Math.max(0, r[0] * rgb[0] + r[1] * rgb[1] + r[2] * rgb[2]));
 }
 const OMEGA_MID = 2 * Math.PI * F_REF / PITCH;          // rad/s: shaking that meets mid-visible (550 nm)
-const BELL_SUM = BELL * Math.sqrt(2 * Math.PI);         // the window's area
 const wellTex = gl.createTexture();
 gl.bindTexture(gl.TEXTURE_2D, wellTex);
 nearest(gl.TEXTURE_2D);
@@ -937,19 +938,28 @@ let wellPts = [];                // its path, newest first: { x, y, t, J: per fr
 // fast its phase turns; its colour from the wavelength that frequency makes. Measured in real
 // time from the pointer's own events (not frames, which may be too few or too slow).
 function demodAt(now, pts) {
-  const z = [0, 0, 0, 0];
+  const seg = [];
+  let mx = 0, my = 0;                            // the drag under the shaking, over the same window
   for (let i = 0; i + 1 < pts.length; i++) {
     const p = pts[i], q = pts[i + 1], dt = p.t - q.t;
-    if (q.t < now - 2 * BELL_LAG - TURN - 0.05) break;   // the window is over (newest first)
+    if (q.t < now - 12 * WIN_A) break;           // the window is over (newest first)
     if (dt <= 0 || q.t > now) continue;
-    const vx = (p.x - q.x) / dt, vy = (p.y - q.y) / dt, s = (p.t + q.t) / 2;
-    const w = Math.exp(-((now - s - BELL_LAG) ** 2) / (2 * BELL * BELL)) * dt * 2 / BELL_SUM;
+    const vx = (p.x - q.x) / dt, vy = (p.y - q.y) / dt, s = (p.t + q.t) / 2, tau = now - s;
+    if (tau <= 0) continue;
+    const w = tau * tau * Math.exp(-tau / WIN_A) / (2 * WIN_A ** 3) * dt;   // (its area is 1)
+    seg.push(vx, vy, s, w);
+    mx += vx * w; my += vy * w;
+  }
+  const z = [0, 0, 0, 0];
+  for (let i = 0; i < seg.length; i += 4) {      // the shaking alone: a plain drag is not light
+    const vx = seg[i] - mx, vy = seg[i + 1] - my, s = seg[i + 2], w = 2 * seg[i + 3];
     const c = Math.cos(OMEGA_MID * s) * w, sn = Math.sin(OMEGA_MID * s) * w;
     z[0] += vx * c; z[1] += vx * sn; z[2] += vy * c; z[3] += vy * sn;
   }
   return z;
 }
-const TURN = 0.02;               // s: the frequency from the phase's turn over this
+const TURN = 0.1;                // s: the frequency from the phase's turn over this (a whole period of
+                                 // the one-sided window's ripple at twice mid: it cancels)
 const MOTION_KEEP = 4;           // s of the well's motion kept (for what it drives far away, later)
 function current(now, at) {
   const pts = [{ x: at.x, y: at.y, t: now }, ...motion];
@@ -959,7 +969,7 @@ function current(now, at) {
   const re = a * z[0] + b * z[1] + c * z[2] + e * z[3], im = a * z[1] - b * z[0] + c * z[3] - e * z[2];
   const omega = OMEGA_MID - Math.atan2(im, re) / TURN;      // z turns at -(omega - OMEGA_MID)
   const nm = LAMBDA_REF * F_REF / (PITCH * omega / (2 * Math.PI));
-  const bell = Math.exp(-(((omega - OMEGA_MID) * BELL) ** 2) / 2);   // the window's response there
+  const bell = (1 + ((omega - OMEGA_MID) * WIN_A) ** 2) ** -1.5;   // the window's response there
   const amp = mag / Math.max(bell, 0.2);
   return {
     J: lineMix(nm).map(I => z.map(v => v / mag * amp * Math.sqrt(I))),   // per frequency here
