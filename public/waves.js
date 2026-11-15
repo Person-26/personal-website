@@ -45,7 +45,7 @@
 (() => {
 'use strict';
 
-const WAVELENGTH = 5;      // CSS px: the wavelength at 200 Hz (a page's data-wavelength, then
+const WAVELENGTH = 4;      // CSS px: the wavelength at 200 Hz (a page's data-wavelength, then
                            // ?wavelength=, override)
 // The frequencies: visible light at these wavelengths (nm), scaled so that 550 nm is 200 Hz.
 const LAMBDA = [460, 540, 620];
@@ -61,7 +61,7 @@ const SEE = [
 ];
 const MIX = [[0.01429, 0.08145, 0.73388], [0.05097, 0.87585, 0.04892], [0.60214, 0.22381, 0.01526], [0, 0, 0]];
 const PPW = 2.5;           // grid points per wavelength of the finest (blue) light
-const MAX_TEXELS = 1 << 20;   // grid points at most (else the wavelength is made longer)
+const GPU_BUDGET = 400e6;  // bytes of GPU memory the field may take (else the wavelength is made longer)
 const BAND = 0.9;          // patterns fitted up to this fraction of each frequency's wavenumber
 const TAPER = 0.75;        // ... rolling off smoothly from this fraction of that
 const GRAZE = 0.1;         // no light with |kx| below this fraction of k ...
@@ -69,7 +69,8 @@ const GRAZE_FULL = 0.22;   // ... full light above this
 const TILT = 0.3;          // sin of the slant toward the middle the fit starts from
 const GS_ITERS = 8;        // phase-fit rounds for a new page ...
 const GS_ITERS_SCROLL = 3; // ... and for a scrolled one (most of it kept)
-const STEPS = 2;           // steps of a scrolled fit per frame (it is spread over frames)
+const STEP_WORK = 1 << 20;  // transform points per frame for a scrolled fit (it is spread over frames: on a
+                           // larger grid, fewer steps per frame, so a frame's work stays about the same)
 const RING = 12;           // grid points around the screen left free by the fit; the ends sit at its edge
 const RAMP = 0.04;         // s: the ends switch a row's light on over this (8 cycles at 200 Hz):
                            // sharp, so the light arrives as a ringing front, not a fade
@@ -871,6 +872,7 @@ function changeDrive(now, fresh) {
   lastStep = now;
 }
 // Some steps of the fit in progress; true when it has finished.
+const steps = () => Math.max(1, Math.round(STEP_WORK / (FX * FY)));
 function stepJob(n) {
   for (let i = 0; i < n && job; i++) if (job.next().done) job = null;
   return !job;
@@ -1127,28 +1129,36 @@ function arrived() {
   }
   return Math.max(0, x);
 }
+// The light is still arriving for a long while (its most grazing part is slow), but the picture
+// stops changing visibly well before: past SETTLED of the way no pixel is more than ~3 of 255 from
+// the standing page, so the drawing stops there. Past CALM it changes slowly and is drawn at
+// about half rate (full rate again whenever the page scrolls, the light is refit or the charge is held).
+const SETTLED = 0.6, CALM = 0.25;
+const CALM_FRAME = 30;           // ms between frames while calm
 function hud(x) {
   hudText.textContent =
     `colour = what the eye sees of light at ${LAMBDA.join(', ')} nm, run at ${FREQ.map(f => Math.round(f)).join(', ')} Hz · ` +
     `sent in only from open boundaries at the left and right · wavelength at ${F_REF} Hz ${Math.round(phys.wl)} px · ` +
-    `${x >= 1 ? 'standing' : `arriving ${Math.round(100 * x)}%`}`;
+    `${x >= SETTLED ? 'standing' : `arriving ${Math.round(100 * x / SETTLED)}%`}`;
 }
 
 // ---------------------------------------------------------------- animation
 function loop() { if (!raf) raf = requestAnimationFrame(tick); }
 
-let lastFrame = 0;
+let lastFrame = 0, lastX = 0;
 function tick(now) {
   raf = 0;
   if (!R) return;                             // waves switched off
-  t += (lastFrame ? Math.min(1 / 30, (now - lastFrame) / 1000) : 1 / 60) / SLOW;
-  if (job) stepJob(STEPS);
-  else if (moved && now - lastStep >= STEP_GAP) { changeDrive(now, false); moved = false; stepJob(STEPS); }
+  const calm = !moved && !job && wellPos === null && lastX >= CALM;
+  if (calm && lastFrame && now - lastFrame < CALM_FRAME) { loop(); return; }   // (this one skipped)
+  t += (lastFrame ? Math.min(1 / 20, (now - lastFrame) / 1000) : 1 / 60) / SLOW;   // (a stall: skipped)
+  if (job) stepJob(steps());
+  else if (moved && now - lastStep >= STEP_GAP) { changeDrive(now, false); moved = false; stepJob(steps()); }
   render();
   draw();
-  const x = arrived();
+  const x = lastX = arrived();
   hud(x);
-  const more = moved || job || x < 1 || wellPos !== null;   // (slowed light: the well's waves)
+  const more = moved || job || x < SETTLED || wellPos !== null;   // (slowed light: the well's waves)
   lastFrame = more ? now : 0;
   if (more) loop();
 }
@@ -1186,6 +1196,13 @@ function enableGlide() {
   for (const type of ['pointerdown', 'keydown', 'touchstart']) addEventListener(type, stopGlide, { passive: true });
 }
 
+// The GPU memory a grid takes (see allocate): per window point, the bands (2 parts x 2 ends x NODES)
+// and the field now and its colour (3), half floats; per transform point, 3 full-float and 3 half-float
+// targets; and the response tables.
+function gpuBytes() {
+  return (W + 2 * RING) * (H + 2 * RING) * (4 * NODES + 3) * 8 + FX * FY * (3 * 16 + 3 * 8) + 2 * NODES * ND * NA * 16;
+}
+
 // The canvas is 100lvh tall, so a phone's URL bar showing or hiding does not resize the box.
 // The grid resolves the finest (blue) light with PPW points per wavelength; if it would have too
 // many points, the wavelength is made longer instead.
@@ -1199,7 +1216,7 @@ function layout() {
   for (;;) {
     W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
     FX = pow2AtLeast(W + 2 * RING); FY = pow2AtLeast(H + 2 * RING);
-    if (FX * FY <= MAX_TEXELS || d < 0.05) break;
+    if (gpuBytes() <= GPU_BUDGET || d < 0.05) break;
     d *= 0.95;
   }
   d = W / Lx;
