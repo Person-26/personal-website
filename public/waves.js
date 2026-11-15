@@ -961,10 +961,22 @@ function demodAt(now, pts) {
 const TURN = 0.1;                // s: the frequency from the phase's turn over this (a whole period of
                                  // the one-sided window's ripple at twice mid: it cancels)
 const MOTION_KEEP = 4;           // s of the well's motion kept (for what it drives far away, later)
+const STILL = 0.06, STILL_FADE = 0.06;   // s: a pointer unmoved this long has stopped (it never pauses so
+                                 // long mid-shake, even at a turn); its current then fades out over this
+// How much of the measured current is still being made: 1 while the pointer moves, falling to 0 once
+// it has stopped. (The window remembers the shaking for a while; a charge that stops radiates no more.)
+function moving(now) {
+  for (let i = 0; i + 1 < motion.length; i++) {
+    if (motion[i].x !== motion[i + 1].x || motion[i].y !== motion[i + 1].y) {
+      return Math.min(1, Math.max(0, 1 - (now - motion[i].t - STILL) / STILL_FADE));
+    }
+  }
+  return 0;
+}
 function current(now, at) {
   const pts = [{ x: at.x, y: at.y, t: now }, ...motion];
   const z = demodAt(now, pts), [a, b, c, e] = demodAt(now - TURN, pts);
-  const mag = Math.hypot(...z);
+  const raw = Math.hypot(...z), mag = raw * moving(now);
   if (!(mag > 0)) return { J: [0, 1, 2].map(() => [0, 0, 0, 0]), Z: [0, 0, 0, 0], f: OMEGA_MID / (2 * Math.PI) };
   const re = a * z[0] + b * z[1] + c * z[2] + e * z[3], im = a * z[1] - b * z[0] + c * z[3] - e * z[2];
   const omega = OMEGA_MID - Math.atan2(im, re) / TURN;      // z turns at -(omega - OMEGA_MID)
@@ -972,8 +984,8 @@ function current(now, at) {
   const bell = (1 + ((omega - OMEGA_MID) * WIN_A) ** 2) ** -1.5;   // the window's response there
   const amp = mag / Math.max(bell, 0.2);
   return {
-    J: lineMix(nm).map(I => z.map(v => v / mag * amp * Math.sqrt(I))),   // per frequency here
-    Z: z.map(v => v / mag * amp),                // the current itself (CSS px/s), complex x, y
+    J: lineMix(nm).map(I => z.map(v => v / raw * amp * Math.sqrt(I))),   // per frequency here
+    Z: z.map(v => v / raw * amp),                // the current itself (CSS px/s), complex x, y
     f: omega / (2 * Math.PI),                    // Hz, real time: how fast it is shaken
   };
 }
