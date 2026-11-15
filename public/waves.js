@@ -660,6 +660,7 @@ const LIN = Float32Array.from({ length: 256 }, (_, i) => {
 // whose transform maps CSS px to the canvas, in the page's current scroll position.
 function paintText(c, h) {
   c.textBaseline = 'middle';
+  const links = new Set();
   const walker = document.createTreeWalker(doc, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     if (!/\S/.test(node.data)) continue;
@@ -670,20 +671,25 @@ function paintText(c, h) {
     if (box.bottom < -40 || box.top > h + 40) continue;
     const cs = getComputedStyle(el);
     c.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-    const link = !!el.closest('a');
+    const link = el.closest('a');
+    if (link) links.add(link);
     c.fillStyle = link ? colors.negCss : el.closest('.muted') ? colors.mutedCss : colors.fgCss;
     const words = /\S+/g;
     for (let m = words.exec(node.data); m; m = words.exec(node.data)) {
       range.setStart(node, m.index);
       range.setEnd(node, m.index + m[0].length);
       const rects = range.getClientRects();
-      if (rects.length === 1) { stamp(c, m[0], rects[0], link); continue; }
+      if (rects.length === 1) { stamp(c, m[0], rects[0]); continue; }
       for (let i = 0; i < m[0].length; i++) {    // word broken across lines: letter by letter
         range.setStart(node, m.index + i);
         range.setEnd(node, m.index + i + 1);
-        stamp(c, m[0][i], range.getClientRects()[0], link);
+        stamp(c, m[0][i], range.getClientRects()[0]);
       }
     }
+  }
+  c.fillStyle = colors.negCss;                   // a link's underline: one line under each of its
+  for (const a of links) {                       // lines, spaces and all, as the plain page has it
+    for (const r of a.getClientRects()) if (r.width > 0) c.fillRect(r.left, r.bottom - 1, r.width, 1.4);
   }
 }
 
@@ -717,10 +723,9 @@ function paintFigures(c, h) {
   }
 }
 
-function stamp(c, text, r, link) {
+function stamp(c, text, r) {
   if (!r || r.width === 0) return;
   c.fillText(text, r.left, r.top + r.height / 2, r.width + 1);
-  if (link) c.fillRect(r.left, r.bottom - 1, r.width, 1.4);
 }
 
 // The page scrolled to grid row `row`, linear sRGB, on the grid: the screen at (OX, OY), dark around.
