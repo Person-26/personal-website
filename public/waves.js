@@ -1031,7 +1031,7 @@ function setClicks(on) {
   if (!on) letGo();
   if (!clickButton) return;
   clickButton.setAttribute('aria-pressed', String(on));
-  clickButton.textContent = on ? 'Click waves: on' : 'Click waves: off';
+  clickButton.textContent = on ? 'Click: on' : 'Click: off';
   try { localStorage.setItem('clicks', on ? 'on' : 'off'); } catch (e) { /* not stored */ }
 }
 addEventListener('pointerdown', e => {
