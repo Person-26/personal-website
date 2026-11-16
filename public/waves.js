@@ -607,10 +607,25 @@ function computeResponse(tmax) {
   }
   return tables;
 }
+// The same tables, computed by waves.wasm (Rust, in wasm/: about twice as fast); computeResponse
+// above if it did not load.
+let wasm = null;
+const wasmLoad = (typeof WebAssembly === 'object' ? fetch('/waves.wasm') : Promise.reject())
+  .then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+  .then(b => WebAssembly.instantiate(b))
+  .then(m => { wasm = m.instance.exports; }, () => {});
+function computeResponseWasm(tmax) {
+  const n = NODES * ND * NA * 4, p = wasm.alloc(2 * n);
+  try {
+    wasm.compute(p, tmax, RAMP, FS, NODES, ND, NA, LS0, DLS, ...FREQ);
+    const all = new Float32Array(wasm.memory.buffer, p, 2 * n);
+    return [all.slice(0, n), all.slice(n)];
+  } finally { wasm.release(p, 2 * n); }
+}
 let tableKey = '', tableData = null;
 function responseTables() {
   const key = phys.tmax.toFixed(4);
-  if (key !== tableKey) { tableData = computeResponse(phys.tmax); tableKey = key; }
+  if (key !== tableKey) { tableData = (wasm ? computeResponseWasm : computeResponse)(phys.tmax); tableKey = key; }
   return tableData.map(data => {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -1300,7 +1315,8 @@ canvas.addEventListener('webglcontextlost', e => {
   if (clickButton) clickButton.hidden = true;
 });
 
-(document.fonts ? document.fonts.ready : Promise.resolve())
-  .then(() => { readColors(); return prepareFigures(); })
-  .then(start);
+Promise.all([
+  (document.fonts ? document.fonts.ready : Promise.resolve()).then(() => { readColors(); return prepareFigures(); }),
+  wasmLoad,
+]).then(start);
 })();

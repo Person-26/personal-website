@@ -1,6 +1,10 @@
 # Personal website
 
-Static site (plain HTML/CSS/JS, no build step). Site files live in `public/`.
+Static site (plain HTML/CSS/JS, no build step on deploy). Site files live in `public/`.
+
+`public/waves.wasm` is built from the Rust in `wasm/` (the response tables `waves.js` needs, about
+twice as fast as its JS fallback) and committed. After editing `wasm/src/lib.rs`, rebuild it with
+`wasm/build.sh` (needs the `wasm32-unknown-unknown` target: `pacman -S rust-wasm`).
 Deployed to Cloudflare Workers via `npx wrangler deploy` on every push to `main`.
 
 Pages are drawn by `waves.js` as simulated light: a scalar wave field of three visible frequencies on a plane in open space,
