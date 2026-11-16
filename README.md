@@ -14,6 +14,9 @@ driven only by open (non-reflecting) boundaries at its left and right and solved
 button to switch to the plain page. Any page that includes `waves.css` and
 `waves.js` and puts its content in `<main id="content">` gets the same mode.
 Without WebGL2 the plain HTML is shown.
+The wavelength is set in the screen's own pixels (so it is finer under display scaling), within a GPU
+memory budget, and the grid is made coarser if the first frames are slow (remembered in
+`localStorage` as `waves-quality`).
 
 `cv.pdf` is the CV page printed (its print styles are at the end of `waves.css`). After editing
 `cv.html`, regenerate it with any Chromium, with the site served locally:

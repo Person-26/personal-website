@@ -45,8 +45,14 @@
 (() => {
 'use strict';
 
-const WAVELENGTH = 4;      // CSS px: the wavelength at 200 Hz (a page's data-wavelength, then
-                           // ?wavelength=, override)
+const WAVELENGTH = 4;      // px: the wavelength at 200 Hz, in the screen's own pixels (a page's
+                           // data-wavelength, then ?wavelength=, override, in CSS px). Its clock runs
+                           // as if it were 4 CSS px: the light crosses the screen as fast at any
+                           // display scaling, only finer where the screen has more pixels
+const QUALITY_STEP = 0.8;  // the grid's density is cut by this while frames are slow ...
+const QUALITY_MIN = 0.4;   // ... down to this
+const SLOW_FRAME = 22;     // ms: a median frame longer than this (under ~45 fps) is slow ...
+const FAST_FRAME = 12;     // ms: ... one under this leaves room: the next visit tries a finer grid
 // The frequencies: visible light at these wavelengths (nm), scaled so that 550 nm is 200 Hz.
 const LAMBDA = [460, 540, 620];
 const F_REF = 200, LAMBDA_REF = 550;
@@ -105,6 +111,8 @@ const params = new URLSearchParams(location.search);
 // real time, so light that is 200 Hz in the field is 200 / SLOW Hz to the viewer, and crosses
 // that much slower.
 const SLOW = Math.max(1, +doc.dataset.slow || 1);
+// Real s per field s: SLOW, over how much faster the field's clock runs on a finer grid (phys.rate).
+const realPerField = () => SLOW / phys.rate;
 const CHARGE = +doc.dataset.charge || 1;   // a page may make the well's charge weaker or stronger
 
 let gl = null;
@@ -495,8 +503,9 @@ let Lx = 0, Ly = 0;            // CSS px
 let W = 0, H = 0, FX = 0, FY = 0, OX = 0, OY = 0;   // grid points: screen; grid; screen offset
 let WW = 0, HH = 0;            // the window: the screen and its ring
 let d = 1;                     // grid points per CSS px
-let wavelength = WAVELENGTH;
-const phys = { wl: 0, k: [0, 0, 0, 0], cps: 1, tmax: 1, amax: 1, bands: null };
+let wavelength = 0;            // CSS px, if set by the page or ?wavelength= (else from WAVELENGTH)
+let quality = 1;               // the grid's density, of the screen's own (cut while frames are slow)
+const phys = { wl: 0, k: [0, 0, 0, 0], cps: 1, tmax: 1, amax: 1, bands: null, rate: 1 };
 let R = null;
 let t = 0;                     // s of time
 let fitRow = 0, hasFit = false;   // the page row the last fit was made at
@@ -952,11 +961,11 @@ function wellPath(row) {
   const { J, Z, f } = current(now, at);
   const reach = Math.hypot(WW, HH) / phys.cps + 0.2;
   const there = held ? 1 : 0;
-  const step = Math.max(WELL_DT / SLOW, reach / (WELL_N - 2));   // field s: enough to span reach
+  const step = Math.max(WELL_DT / realPerField(), reach / (WELL_N - 2));   // field s: enough to span reach
   if (!wellPts.length || t - wellPts[0].t >= step || t < wellPts[0].t) wellPts.unshift({ x: at.x, y: at.y, t, J, Z, f, there });
   wellPts = wellPts.filter(p => p.t <= t && t - p.t < reach).slice(0, WELL_N - 1);
   shaking = { f, Z };
-  const quiet = 1e-3 * phys.wl * F_REF;          // a current too weak to see (CSS px/s)
+  const quiet = 1e-3 * phys.wl * F_REF / realPerField();   // a current too weak to see (CSS px per real s)
   const lit = held || wellPts.some(p => p.there || strength(p.J) > quiet) || strength(J) > quiet;
   if (!lit) {
     if (!motion.length) { wellPos = null; wellPts = []; }
@@ -965,7 +974,7 @@ function wellPath(row) {
   const pts = [{ x: at.x, y: at.y, t, J, Z, f, there }, ...wellPts];
   pts.forEach((p, i) => {
     wellBuf.set([p.x * d + RING - 0.5, p.y * d - row + RING - 0.5, t - p.t, p.there], i * 4);
-    for (let f = 0; f < 3; f++) wellBuf.set(p.J[f].map(v => v * d * SLOW), ((f + 1) * WELL_N + i) * 4);   // grid points per field s
+    for (let f = 0; f < 3; f++) wellBuf.set(p.J[f].map(v => v * d * realPerField()), ((f + 1) * WELL_N + i) * 4);   // grid points per field s
   });
   gl.bindTexture(gl.TEXTURE_2D, wellTex);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, WELL_N, 4, gl.RGBA, gl.FLOAT, wellBuf);
@@ -1017,7 +1026,7 @@ window.wavesField = {
   motion: () => (held ? [{ x: held.x, y: held.y, t: performance.now() / 1000 }, ...motion] : motion),
   gain: () => WELL_GAIN * CHARGE,
   core: () => WELL_R0 / d,
-  speed: () => phys.wl * F_REF / SLOW,
+  speed: () => phys.wl * F_REF / realPerField(),
   shaking: () => ({ f: shaking.f, strength: Math.hypot(...shaking.Z) }),
   at(x, y) {
     if (!R || !wellPos || wellPts.length < 2) return [];
@@ -1032,7 +1041,7 @@ window.wavesField = {
         const u = f0 / (f0 - f1), sx = p.x + (q.x - p.x) * u, sy = p.y + (q.y - p.y) * u;
         const r = Math.hypot(x - sx, y - sy), dx = (x - sx) / Math.max(r, 1e-3), dy = (y - sy) / Math.max(r, 1e-3);
         const Z = p.Z.map((v, k) => v + (q.Z[k] - v) * u), f = p.f + (q.f - p.f) * u;
-        const g = WELL_GAIN * CHARGE / c * SLOW * Math.sqrt(r0 / Math.max(r, r0));   // (Z is per real s)
+        const g = WELL_GAIN * CHARGE / c * realPerField() * Math.sqrt(r0 / Math.max(r, r0));   // (Z is per real s)
         const jr = Z[0] * -dy + Z[2] * dx, ji = Z[1] * -dy + Z[3] * dx;    // across the line to here
         const k = 2 * Math.PI * f * PITCH / c;      // rad per CSS px: the light's own wavenumber
         const ph = k * r;
@@ -1085,12 +1094,39 @@ const CALM_FRAME = 30;           // ms between frames while calm
 function hud(x) {
   hudText.textContent =
     `colour = what the eye sees of light at ${LAMBDA.join(', ')} nm, run at ${FREQ.map(f => Math.round(f)).join(', ')} Hz · ` +
-    `sent in only from open boundaries at the left and right · wavelength at ${F_REF} Hz ${Math.round(phys.wl)} px · ` +
+    `sent in only from open boundaries at the left and right · wavelength at ${F_REF} Hz ${+phys.wl.toFixed(1)} px · ` +
     `${x >= SETTLED ? 'standing' : `arriving ${Math.round(100 * x / SETTLED)}%`}`;
 }
 
 // ---------------------------------------------------------------- animation
 function loop() { if (!raf) raf = requestAnimationFrame(tick); }
+
+// Adaptive quality: while the light arrives (every frame drawn), the time between frames. If the
+// median is slow, the grid is made coarser (QUALITY_STEP in density) and the page forms again on
+// it; the quality is remembered, and a visit with frames to spare lets the next one try finer.
+// (Only with the wavelength from the screen: a page's or ?wavelength= is kept as set.)
+const FRAMES_SKIP = 10, FRAMES_N = 30;   // frames: the first few (setting up) not counted; then this many
+const frames = [];
+frames.skip = FRAMES_SKIP;
+let qualityDone = false;
+document.addEventListener('visibilitychange', () => { frames.length = 0; frames.skip = 2; });   // (a gap while hidden)
+function timeFrame(ms) {
+  if (qualityDone || wavelength || SLOW > 1 || ms > 2000) return;   // (a long stall: not the GPU)
+  if (frames.skip > 0) { frames.skip--; return; }
+  frames.push(ms);
+  if (frames.length < FRAMES_N) return;
+  const median = frames.slice().sort((a, b) => a - b)[FRAMES_N >> 1];
+  frames.length = 0;
+  const store = q => { try { localStorage.setItem('waves-quality', q.toFixed(3)); } catch (e) { /* not stored */ } };
+  if (median > SLOW_FRAME && quality > QUALITY_MIN) {
+    quality = Math.max(QUALITY_MIN, quality * QUALITY_STEP);
+    store(quality);
+    relayout();
+  } else {
+    if (median < FAST_FRAME && quality < 1) store(Math.min(1, quality / QUALITY_STEP));
+    qualityDone = true;
+  }
+}
 
 let lastFrame = 0, lastX = 0;
 function tick(now) {
@@ -1098,7 +1134,8 @@ function tick(now) {
   if (!R) return;                             // waves switched off
   const calm = !moved && !job && wellPos === null && lastX >= CALM;
   if (calm && lastFrame && now - lastFrame < CALM_FRAME) { loop(); return; }   // (this one skipped)
-  t += (lastFrame ? Math.min(1 / 20, (now - lastFrame) / 1000) : 1 / 60) / SLOW;   // (a stall: skipped)
+  if (lastFrame && !calm && !moved && !job) timeFrame(now - lastFrame);
+  t += (lastFrame ? Math.min(1 / 20, (now - lastFrame) / 1000) : 1 / 60) / realPerField();   // (a stall: skipped)
   if (job) stepJob(steps());
   else if (moved && now - lastStep >= STEP_GAP) { changeDrive(now, false); moved = false; stepJob(steps()); }
   render();
@@ -1158,19 +1195,29 @@ function measure() {
   root.classList.add('sizing');                  // (the canvas is laid out only when live)
   const Lx = canvas.clientWidth, Ly = canvas.clientHeight;
   root.classList.remove('sizing');
-  const blue = wl => wl * F_REF / FREQ[0];                         // blue wavelength, CSS px
-  let d = PPW / blue(wavelength), W, H, FX, FY;
-  for (;;) {
-    W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
-    FX = pow2AtLeast(W + 2 * RING); FY = pow2AtLeast(H + 2 * RING);
-    if (gpuBytes(W, H, FX, FY) <= GPU_BUDGET || d < 0.05) break;
-    d *= 0.95;
-  }
-  d = W / Lx;
-  const wl = Math.max(wavelength, PPW / d * FREQ[0] / F_REF);
-  const cps = wl * d * F_REF;                                      // light speed, grid points per s
-  const tmax = (W + 2 * RING) / cps;                               // s: light across the window
-  return { Lx, Ly, d, W, H, FX, FY, wl, cps, tmax, bands: bandTimes(tmax) };
+  const size = target => {                       // the grid for a wavelength (CSS px), within the budget
+    const blue = wl => wl * F_REF / FREQ[0];                       // blue wavelength, CSS px
+    let d = PPW / blue(target), W, H, FX, FY;
+    for (;;) {
+      W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
+      FX = pow2AtLeast(W + 2 * RING); FY = pow2AtLeast(H + 2 * RING);
+      if (gpuBytes(W, H, FX, FY) <= GPU_BUDGET || d < 0.05) break;
+      d *= 0.95;
+    }
+    d = W / Lx;
+    return { d, W, H, FX, FY, wl: Math.max(target, PPW / d * FREQ[0] / F_REF) };
+  };
+  // The wavelength in the screen's pixels (at this quality), and the field's clock sped up so the
+  // light moves as it would at WAVELENGTH CSS px: rate field s per real s.
+  // (Not on a page whose light is slowed: there the light's frequency is the hand's own, kept.)
+  const own = !wavelength && SLOW === 1;
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const full = size(wavelength || (own ? WAVELENGTH / dpr : WAVELENGTH));   // the finest the budget allows
+  const g = own && quality < 1 ? size(full.wl / quality) : full;         // ... made coarser if frames were slow
+  const rate = own ? size(WAVELENGTH).wl / g.wl : 1;
+  const cps = g.wl * g.d * F_REF;                                  // light speed, grid points per field s
+  const tmax = (g.W + 2 * RING) / cps;                             // field s: light across the window
+  return { Lx, Ly, ...g, cps, tmax, rate, bands: bandTimes(tmax) };
 }
 function layout(m, tables) {
   ({ Lx, Ly, d, W, H, FX, FY } = m);
@@ -1183,6 +1230,7 @@ function layout(m, tables) {
   phys.k = FREQ.map(f => 2 * Math.PI / (m.wl * F_REF / f * d));   // radians per grid point
   phys.cps = m.cps;
   phys.tmax = m.tmax;
+  phys.rate = m.rate;
   phys.bands = m.bands;
   phys.amax = Math.max(...phys.bands.slow.map((sb, b) => phys.tmax * sb + phys.bands.span[b]));   // s: all arrived
   LIT0 = RING + 8;
@@ -1251,24 +1299,30 @@ function start() {
   modeButton.addEventListener('click', () => setWaves(modeButton.getAttribute('aria-pressed') !== 'true'));
   if (clickButton) clickButton.addEventListener('click', () => setClicks(!clicks));
   setClicks(clicks);
-  wavelength = Math.min(400, Math.max(4, +params.get('wavelength') || +doc.dataset.wavelength || WAVELENGTH));
+  const set = +params.get('wavelength') || +doc.dataset.wavelength;
+  wavelength = set ? Math.min(400, Math.max(1, set)) : 0;
+  try { quality = Math.min(1, Math.max(QUALITY_MIN, +localStorage.getItem('waves-quality') || 1)); } catch (e) { /* 1 */ }
   setWaves(on, params.has('still'));   // the drive switches on at load
   enableGlide();
 
   let timer = 0;
   addEventListener('resize', () => {
     clearTimeout(timer);
-    timer = setTimeout(async function resized() {
-      if (!R || (canvas.clientWidth === Lx && canvas.clientHeight === Ly)) return;
-      let ready;
-      try { ready = await prepare(); } catch (e) { console.warn('waves: not resized', e); return; }
-      if (!R) return;
-      if (!ready) { resized(); return; }            // (resized again meanwhile)
-      layout(...ready);
-      changeDrive(performance.now(), true);         // a new box: the page forms again
-      loop();
+    timer = setTimeout(() => {
+      if (R && (canvas.clientWidth !== Lx || canvas.clientHeight !== Ly)) relayout();
     }, 180);
   });
+}
+// A new grid (a new box, or a new quality): the page forms again on it.
+async function relayout() {
+  let ready;
+  try { ready = await prepare(); } catch (e) { console.warn('waves: not laid out again', e); return; }
+  if (!R) return;
+  if (!ready) { relayout(); return; }            // (resized again meanwhile)
+  layout(...ready);
+  changeDrive(performance.now(), true);
+  frames.length = 0; frames.skip = FRAMES_SKIP;
+  loop();
 }
 
 canvas.addEventListener('webglcontextlost', e => {
