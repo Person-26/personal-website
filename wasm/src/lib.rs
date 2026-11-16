@@ -1,4 +1,4 @@
-// The response tables of waves.js (computeResponse there, which is the reference and the fallback;
+// The response tables of waves.js (computeResponse in waves-response.js is the reference and the fallback;
 // see its comments for the physics). For each band of k / |kx| and each frequency: the wave
 // arriving at distance T from an end that was switched on (over RAMP) at time 0, as a function of
 // its age from the group arrival, found through its spectrum by FFT and blended into 1 once settled.

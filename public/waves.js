@@ -508,44 +508,6 @@ function freeResources() {
   R = null;
 }
 
-// ---------------------------------------------------------------- the response from an end
-// For each frequency, band node (|kx| / k = 1 / s) and distance T (in light-seconds, 0..tmax):
-// the field at that distance from an end that switches the mode on over RAMP, relative to its
-// steady state. The mode crosses as a Klein-Gordon wave, kx(w) = sqrt(w^2 - kappa^2) (c = 1,
-// kappa^2 = k^2 - kx^2: its wavenumber along y and z), so
-//   E(T, t) = (1 / 2 pi) int R^(W) e^{i (kx(w + W) - kx(w)) T} e^{-i W t} dW,
-// R^ the spectrum of the switch-on; evaluated by FFT (the switch-on made a long pulse, so it
-// is periodic, and read before it ends). Nothing arrives before the light-speed front (t = T);
-// the wave itself comes at the group velocity (t = T s), ringing, its precursors ahead of it.
-// Tabulated by age from the group arrival, tau = t - T s, from the front at the farthest
-// distance (-lead) until it has settled (span), when it is blended into 1.
-const twiddles = {};
-function fftInPlace(re, im, sign) {
-  const n = re.length;
-  if (!twiddles[n]) {
-    const c = new Float64Array(n / 2), si = new Float64Array(n / 2);
-    for (let i = 0; i < n / 2; i++) { c[i] = Math.cos(2 * Math.PI * i / n); si[i] = Math.sin(2 * Math.PI * i / n); }
-    twiddles[n] = [c, si];
-  }
-  const [C, S] = twiddles[n];
-  for (let i = 1, j = 0; i < n; i++) {
-    let bit = n >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
-    if (i < j) { let x = re[i]; re[i] = re[j]; re[j] = x; x = im[i]; im[i] = im[j]; im[j] = x; }
-  }
-  for (let len = 2; len <= n; len <<= 1) {
-    const step = n / len, h = len >> 1;
-    for (let i = 0; i < n; i += len) {
-      for (let j = 0; j < h; j++) {
-        const cr = C[j * step], ci = sign * S[j * step], p = i + j, q = p + h;
-        const xr = re[q] * cr - im[q] * ci, xi = re[q] * ci + im[q] * cr;
-        re[q] = re[p] - xr; im[q] = im[p] - xi;
-        re[p] += xr; im[p] += xi;
-      }
-    }
-  }
-}
 // Per band: k / |kx|, and the table's ages before and after the group arrival.
 function bandTimes(tmax) {
   const slow = [], lead = [], span = [];
@@ -555,78 +517,40 @@ function bandTimes(tmax) {
   }
   return { slow, lead, span };
 }
-function computeResponse(tmax) {
-  const ramp = x => x <= 0 ? 0 : x >= RAMP ? 1 : 0.5 - 0.5 * Math.cos(Math.PI * x / RAMP);
-  const DT = 1 / FS;
-  const { slow, lead, span } = bandTimes(tmax);
-  const tables = [new Float32Array(NODES * ND * NA * 4), new Float32Array(NODES * ND * NA * 4)];
-  for (let b = 0; b < NODES; b++) {
-    const last = tmax * slow[b] + span[b];             // the latest age needed
-    const pulse = last + 1;
-    const N = pow2AtLeast(Math.ceil((2 * last + 4) * FS));
-    const Rr = new Float64Array(N), Ri = new Float64Array(N);
-    for (let n = 0; n < N; n++) Rr[n] = (ramp(n * DT) - ramp(n * DT - pulse)) * DT;
-    fftInPlace(Rr, Ri, 1);                             // R^(W_m), W_m = 2 pi m / (N DT)
-    const er = new Float64Array(N), ei = new Float64Array(N);
-    const dkr = new Float64Array(N), dki = new Float64Array(N);
-    for (let f = 0; f < 3; f++) {
-      const w = 2 * Math.PI * FREQ[f];
-      const tab = tables[f >> 1], ch = (f & 1) * 2;
-      const kx0 = w / slow[b], kap2 = w * w - kx0 * kx0;
-      for (let m = 0; m < N; m++) {                     // kx(w + W) - kx(w), causal branch
-        const W = 2 * Math.PI * (m < N / 2 ? m : m - N) / (N * DT), om = w + W;
-        const q = om * om - kap2;
-        if (q >= 0) { dkr[m] = Math.sign(om) * Math.sqrt(q) - kx0; dki[m] = 0; }
-        else { dkr[m] = -kx0; dki[m] = Math.sqrt(-q); }
-      }
-      for (let iT = 0; iT < ND; iT++) {
-        const T = tmax * iT / (ND - 1);
-        for (let m = 0; m < N; m++) {
-          const mag = Math.exp(-dki[m] * T), ph = dkr[m] * T;
-          const c = mag * Math.cos(ph), si = mag * Math.sin(ph);
-          er[m] = Rr[m] * c - Ri[m] * si; ei[m] = Rr[m] * si + Ri[m] * c;
-        }
-        fftInPlace(er, ei, -1);
-        const norm = 1 / (N * DT);
-        for (let ia = 0; ia < NA; ia++) {
-          const tau = -lead[b] + (lead[b] + span[b]) * ia / (NA - 1), a = T * slow[b] + tau;
-          let rr = 0, ri = 0;
-          if (a > 0) {
-            const x = a / DT, n0 = Math.min(N - 2, Math.floor(x)), fx = x - n0;
-            rr = (er[n0] * (1 - fx) + er[n0 + 1] * fx) * norm;
-            ri = (ei[n0] * (1 - fx) + ei[n0 + 1] * fx) * norm;
-          }
-          const fade = Math.min(1, Math.max(0, (tau - 0.6 * span[b]) / (0.4 * span[b])));
-          const sm = fade * fade * (3 - 2 * fade);
-          rr += (1 - rr) * sm; ri -= ri * sm;
-          const o = ((ia * NODES + b) * ND + iT) * 4 + ch;
-          tab[o] = rr; tab[o + 1] = ri;
-        }
-      }
-    }
-  }
-  return tables;
-}
-// The same tables, computed by waves.wasm (Rust, in wasm/: about twice as fast); computeResponse
-// above if it did not load.
-let wasm = null;
-const wasmLoad = (typeof WebAssembly === 'object' ? fetch('/waves.wasm') : Promise.reject())
-  .then(r => r.ok ? r.arrayBuffer() : Promise.reject())
-  .then(b => WebAssembly.instantiate(b))
-  .then(m => { wasm = m.instance.exports; }, () => {});
-function computeResponseWasm(tmax) {
-  const n = NODES * ND * NA * 4, p = wasm.alloc(2 * n);
-  try {
-    wasm.compute(p, tmax, RAMP, FS, NODES, ND, NA, LS0, DLS, ...FREQ);
-    const all = new Float32Array(wasm.memory.buffer, p, 2 * n);
-    return [all.slice(0, n), all.slice(n)];
-  } finally { wasm.release(p, 2 * n); }
-}
+// ---------------------------------------------------------------- the response from an end
+// The response of each band (see waves-response.js, which computes it in a worker, off this thread):
+// per frequency, band and distance from an end, the light arriving there by age, relative to its
+// steady state. Asked for once per window size, and kept.
+const responseWorker = new Worker('/waves-response.js');
+const pendingTables = new Map();
+let tablesId = 0;
+responseWorker.onmessage = ({ data: { id, tables, error } }) => {
+  const p = pendingTables.get(id);
+  if (!p) return;
+  pendingTables.delete(id);
+  if (tables) p.resolve(tables); else p.reject(new Error(error));
+};
+responseWorker.onerror = e => {                  // (the worker did not load)
+  e.preventDefault();
+  for (const p of pendingTables.values()) p.reject(new Error('waves: response worker failed'));
+  pendingTables.clear();
+};
 let tableKey = '', tableData = null;
-function responseTables() {
-  const key = phys.tmax.toFixed(4);
-  if (key !== tableKey) { tableData = (wasm ? computeResponseWasm : computeResponse)(phys.tmax); tableKey = key; }
-  return tableData.map(data => {
+function responseData(tmax, bands) {
+  const key = tmax.toFixed(4);
+  if (key !== tableKey) {
+    tableKey = key;
+    tableData = new Promise((resolve, reject) => {
+      const id = ++tablesId;
+      pendingTables.set(id, { resolve, reject });
+      responseWorker.postMessage({ id, tmax, bands, c: { RAMP, FS, NODES, ND, NA, LS0, DLS, FREQ } });
+    });
+    tableData.catch(() => { if (tableKey === key) tableKey = ''; });   // (asked again next time)
+  }
+  return tableData;
+}
+function responseTables(data) {
+  return data.map(data => {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     nearest(gl.TEXTURE_2D);
@@ -639,7 +563,7 @@ function responseTables() {
   });
 }
 
-function allocate() {
+function allocate(tables) {
   freeResources();
   if (Math.max(FX, FY, NODES * ND) > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('grid too large');
   const A = gl.createTexture();
@@ -654,7 +578,7 @@ function allocate() {
     L: layers(WW, HH, 2 * 2 * NODES),            // the bands: part, end, node
     cur: [target(WW, HH, true), target(WW, HH, true)],   // the field now, on the window
     see: target(WW, HH, true),                   // what it looks like (linear sRGB)
-    E: responseTables(),                         // the response of each band
+    E: responseTables(tables),                   // the response of each band
     A,                                           // the age of each window row's light
   };
   ageBuf = new Float32Array(HH);
@@ -1214,44 +1138,65 @@ function enableGlide() {
 // The GPU memory a grid takes (see allocate): per window point, the bands (2 parts x 2 ends x NODES)
 // and the field now and its colour (3), half floats; per transform point, 3 full-float and 3 half-float
 // targets; and the response tables.
-function gpuBytes() {
+function gpuBytes(W, H, FX, FY) {
   return (W + 2 * RING) * (H + 2 * RING) * (4 * NODES + 3) * 8 + FX * FY * (3 * 16 + 3 * 8) + 2 * NODES * ND * NA * 16;
 }
 
 // The canvas is 100lvh tall, so a phone's URL bar showing or hiding does not resize the box.
 // The grid resolves the finest (blue) light with PPW points per wavelength; if it would have too
-// many points, the wavelength is made longer instead.
-function layout() {
-  Lx = canvas.clientWidth; Ly = canvas.clientHeight;
-  const dpr = Math.min(devicePixelRatio || 1, 2);
-  canvas.width = Math.round(Lx * dpr);
-  canvas.height = Math.round(Ly * dpr);
+// many points, the wavelength is made longer instead. measure() works out the grid for the box as
+// it is now (changing nothing); layout() switches to it, once its response tables have come.
+function measure() {
+  root.classList.add('sizing');                  // (the canvas is laid out only when live)
+  const Lx = canvas.clientWidth, Ly = canvas.clientHeight;
+  root.classList.remove('sizing');
   const blue = wl => wl * F_REF / FREQ[0];                         // blue wavelength, CSS px
-  d = PPW / blue(wavelength);
+  let d = PPW / blue(wavelength), W, H, FX, FY;
   for (;;) {
     W = Math.max(8, Math.round(Lx * d)); H = Math.max(8, Math.round(Ly * d));
     FX = pow2AtLeast(W + 2 * RING); FY = pow2AtLeast(H + 2 * RING);
-    if (gpuBytes() <= GPU_BUDGET || d < 0.05) break;
+    if (gpuBytes(W, H, FX, FY) <= GPU_BUDGET || d < 0.05) break;
     d *= 0.95;
   }
   d = W / Lx;
+  const wl = Math.max(wavelength, PPW / d * FREQ[0] / F_REF);
+  const cps = wl * d * F_REF;                                      // light speed, grid points per s
+  const tmax = (W + 2 * RING) / cps;                               // s: light across the window
+  return { Lx, Ly, d, W, H, FX, FY, wl, cps, tmax, bands: bandTimes(tmax) };
+}
+function layout(m, tables) {
+  ({ Lx, Ly, d, W, H, FX, FY } = m);
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width = Math.round(Lx * dpr);
+  canvas.height = Math.round(Ly * dpr);
   OX = (FX - W) >> 1; OY = (FY - H) >> 1;
   WW = W + 2 * RING; HH = H + 2 * RING;
-  const wl = Math.max(wavelength, PPW / d * FREQ[0] / F_REF);
-  phys.wl = wl;
-  phys.k = FREQ.map(f => 2 * Math.PI / (wl * F_REF / f * d));     // radians per grid point
-  phys.cps = wl * d * F_REF;                                       // light speed, grid points per s
-  phys.tmax = WW / phys.cps;                                       // s: light across the window
-  phys.bands = bandTimes(phys.tmax);
+  phys.wl = m.wl;
+  phys.k = FREQ.map(f => 2 * Math.PI / (m.wl * F_REF / f * d));   // radians per grid point
+  phys.cps = m.cps;
+  phys.tmax = m.tmax;
+  phys.bands = m.bands;
   phys.amax = Math.max(...phys.bands.slow.map((sb, b) => phys.tmax * sb + phys.bands.span[b]));   // s: all arrived
   LIT0 = RING + 8;
   lit = new Float64Array(Math.ceil(document.documentElement.scrollHeight * d) + 2 * (H + RING) + 32).fill(NaN);
-  allocate();
+  allocate(tables);
+}
+// The tables for a box, then the switch to it; null if the waves were switched (off, or on again)
+// or the box changed meanwhile.
+let generation = 0;
+async function prepare() {
+  const g = generation, m = measure();
+  const tables = await responseData(m.tmax, m.bands);
+  if (g !== generation) return null;
+  const now = measure();
+  return now.Lx === m.Lx && now.Ly === m.Ly ? [m, tables] : null;
 }
 
 // Waves on: the canvas draws the page, sent in from the ends from scratch. Off: the plain page,
-// with the simulation stopped and its GPU memory freed. The choice is remembered.
-function setWaves(on, settledStart) {
+// with the simulation stopped and its GPU memory freed. The choice is remembered. The plain page
+// stays until the response tables have come (a few hundred ms, in the worker).
+async function setWaves(on, settledStart) {
+  const g = ++generation;
   modeButton.setAttribute('aria-pressed', String(on));
   modeButton.textContent = on ? 'Waves: on' : 'Waves: off';
   if (clickButton) clickButton.hidden = !on;
@@ -1263,9 +1208,16 @@ function setWaves(on, settledStart) {
     freeResources();
     return;
   }
+  let ready = null;
+  try { ready = await prepare(); } catch (e) { ready = e; }
+  if (g !== generation) return;                  // switched again meanwhile
+  if (ready === null) { setWaves(true, settledStart); return; }   // (the box changed: again)
   root.classList.add('live');
   readColors();
-  try { layout(); } catch (e) {
+  try {
+    if (ready instanceof Error) throw ready;
+    layout(...ready);
+  } catch (e) {
     console.warn('waves: falling back to the plain page', e);
     root.classList.remove('live');
     freeResources();
@@ -1288,7 +1240,7 @@ function start() {
   let on = true;
   try { on = localStorage.getItem('waves') !== 'off'; } catch (e) { /* default on */ }
   modeButton.hidden = false;
-  modeButton.addEventListener('click', () => setWaves(!R));
+  modeButton.addEventListener('click', () => setWaves(modeButton.getAttribute('aria-pressed') !== 'true'));
   if (clickButton) clickButton.addEventListener('click', () => setClicks(!clicks));
   setClicks(clicks);
   wavelength = Math.min(400, Math.max(4, +params.get('wavelength') || +doc.dataset.wavelength || WAVELENGTH));
@@ -1298,9 +1250,13 @@ function start() {
   let timer = 0;
   addEventListener('resize', () => {
     clearTimeout(timer);
-    timer = setTimeout(() => {
+    timer = setTimeout(async function resized() {
       if (!R || (canvas.clientWidth === Lx && canvas.clientHeight === Ly)) return;
-      layout();
+      let ready;
+      try { ready = await prepare(); } catch (e) { console.warn('waves: not resized', e); return; }
+      if (!R) return;
+      if (!ready) { resized(); return; }            // (resized again meanwhile)
+      layout(...ready);
       changeDrive(performance.now(), true);         // a new box: the page forms again
       loop();
     }, 180);
@@ -1311,12 +1267,12 @@ canvas.addEventListener('webglcontextlost', e => {
   e.preventDefault();
   root.classList.remove('live');
   R = null;
+  generation++;                                  // (and none still to come)
   modeButton.hidden = true;
   if (clickButton) clickButton.hidden = true;
 });
 
-Promise.all([
-  (document.fonts ? document.fonts.ready : Promise.resolve()).then(() => { readColors(); return prepareFigures(); }),
-  wasmLoad,
-]).then(start);
+(document.fonts ? document.fonts.ready : Promise.resolve())
+  .then(() => { readColors(); return prepareFigures(); })
+  .then(start);
 })();

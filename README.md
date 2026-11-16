@@ -2,8 +2,9 @@
 
 Static site (plain HTML/CSS/JS, no build step on deploy). Site files live in `public/`.
 
-`public/waves.wasm` is built from the Rust in `wasm/` (the response tables `waves.js` needs, about
-twice as fast as its JS fallback) and committed. After editing `wasm/src/lib.rs`, rebuild it with
+`waves.js` gets its response tables from a Web Worker (`public/waves-response.js`), off the page's
+thread. The worker computes them with `public/waves.wasm`, built from the Rust in `wasm/` and committed
+(about twice as fast as the worker's JS fallback). After editing `wasm/src/lib.rs`, rebuild it with
 `wasm/build.sh` (needs the `wasm32-unknown-unknown` target: `pacman -S rust-wasm`).
 Deployed to Cloudflare Workers via `npx wrangler deploy` on every push to `main`.
 
