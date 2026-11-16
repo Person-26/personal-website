@@ -117,7 +117,8 @@ const LINEAR = !!gl.getExtension('OES_texture_float_linear');     // filtered ta
 // ---------------------------------------------------------------- shaders
 // The grid (F.x x F.y, powers of two, periodic) holds the screen at (OX, OY) and a free ring
 // around it; the window is the screen and its ring. Fields and spectra hold two complex numbers
-// per texel: frequencies 2p and 2p + 1 of part p (the fourth is spare).
+// per texel: frequencies 2p and 2p + 1 of part p (the fourth is spare: on the window, where most of
+// the memory is, part 1 is stored with two channels, not four).
 const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\nout vec4 o;\n';
 const VS = '#version 300 es\nin vec2 p;\nvoid main(){ gl_Position = vec4(p, 0.0, 1.0); }';
 const CPLX = `
@@ -235,8 +236,9 @@ void main() {
 // The field now, on the window: every band of light from each end, weighted by its response at
 // that point's distance from the end and the age of the light in that row of the page.
 const FS_COMBINE = HEAD + CPLX + `
-uniform sampler2DArray L;      // the bands: layer (part * 2 + side) * NODES + node; row: page row mod hh
-uniform sampler2D E, A;        // the response (this part's two frequencies); each row's age
+uniform sampler2DArray L;      // this part's bands: layer side * NODES + node; row: page row mod hh
+                               // (part 1: two channels; its spare .zw comes out meaningless and is not kept)
+uniform sampler2D E, A;        // the response (this part's frequencies); each row's age
 uniform int part, base, hh, ww;   // the bands' slot for the window's first row; window size
 uniform float cps, tmax, amax; // light speed (grid points per s); distances in the table; all arrived
 uniform float slow[${NODES}], lead[${NODES}], span[${NODES}];   // per band: k / |kx|; the table's ages
@@ -263,7 +265,7 @@ void main() {
   for (int s = 0; s < 2; s++) {
     float T = (s == 0 ? float(n.x) + 0.5 : float(ww - n.x) - 0.5) / cps;
     for (int b = 0; b < ${NODES}; b++) {
-      vec4 f = texelFetch(L, ivec3(n.x, ys, (part * 2 + s) * ${NODES} + b), 0);
+      vec4 f = texelFetch(L, ivec3(n.x, ys, s * ${NODES} + b), 0);
       if (done) { sum += f; continue; }
       vec4 e = at(b, T, a);
       sum += vec4(cmul(e.xy, f.xy), cmul(e.zw, f.zw));
@@ -431,13 +433,18 @@ function nearest(target) {
 }
 function complete() { return gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE; }
 // A 2D float render target; half precision where allowed and asked for.
-function target(w, h, half) {
-  const formats = half ? [[gl.RGBA16F, gl.HALF_FLOAT], [gl.RGBA32F, gl.FLOAT]] : [[gl.RGBA32F, gl.FLOAT]];
-  for (const [ifmt, type] of formats) {
+// Float formats with 4 or 2 channels (a 2-channel texel reads as (r, g, 0, 1)), half first if allowed.
+const FORMATS = {
+  4: { half: [gl.RGBA16F, gl.HALF_FLOAT], full: [gl.RGBA32F, gl.FLOAT], fmt: gl.RGBA },
+  2: { half: [gl.RG16F, gl.HALF_FLOAT], full: [gl.RG32F, gl.FLOAT], fmt: gl.RG },
+};
+const formats = (half, ch) => (half ? [FORMATS[ch].half, FORMATS[ch].full] : [FORMATS[ch].full]);
+function target(w, h, half, ch = 4) {
+  for (const [ifmt, type] of formats(half, ch)) {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
     nearest(gl.TEXTURE_2D);
-    gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, gl.RGBA, type, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, FORMATS[ch].fmt, type, null);
     const f = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, f);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
@@ -447,12 +454,12 @@ function target(w, h, half) {
   throw new Error('no float render target');
 }
 // A stack of float layers (half precision unless `full`), each renderable.
-function layers(w, h, n, full) {
-  for (const [ifmt, type] of full ? [[gl.RGBA32F, gl.FLOAT]] : [[gl.RGBA16F, gl.HALF_FLOAT], [gl.RGBA32F, gl.FLOAT]]) {
+function layers(w, h, n, ch) {
+  for (const [ifmt, type] of formats(true, ch)) {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
     nearest(gl.TEXTURE_2D_ARRAY);
-    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, ifmt, w, h, n, 0, gl.RGBA, type, null);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, ifmt, w, h, n, 0, FORMATS[ch].fmt, type, null);
     const fbos = [];
     let ok = true;
     for (let i = 0; i < n && ok; i++) {
@@ -502,7 +509,7 @@ const pow2AtLeast = n => 1 << Math.ceil(Math.log2(Math.max(2, n)));
 function freeResources() {
   if (!R) return;
   for (const r of [...R.pair, R.mix, R.page, ...R.fit, ...R.cur, R.see]) { gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); }
-  gl.deleteTexture(R.L.t); R.L.fbos.forEach(f => gl.deleteFramebuffer(f));
+  for (const l of R.L) { gl.deleteTexture(l.t); l.fbos.forEach(f => gl.deleteFramebuffer(f)); }
   R.E.forEach(e => gl.deleteTexture(e));
   gl.deleteTexture(R.A);
   R = null;
@@ -520,7 +527,7 @@ function bandTimes(tmax) {
 // ---------------------------------------------------------------- the response from an end
 // The response of each band (see waves-response.js, which computes it in a worker, off this thread):
 // per frequency, band and distance from an end, the light arriving there by age, relative to its
-// steady state. Asked for once per window size, and kept.
+// steady state. Asked for per window size.
 const responseWorker = new Worker('/waves-response.js');
 const pendingTables = new Map();
 let tablesId = 0;
@@ -545,16 +552,17 @@ function responseData(tmax, bands) {
       pendingTables.set(id, { resolve, reject });
       responseWorker.postMessage({ id, tmax, bands, c: { RAMP, FS, NODES, ND, NA, LS0, DLS, FREQ } });
     });
-    tableData.catch(() => { if (tableKey === key) tableKey = ''; });   // (asked again next time)
+    tableData.then(() => {}, () => {}).then(() => { if (tableKey === key) { tableKey = ''; tableData = null; } });
+                                                 // (shared while coming, then not kept)
   }
   return tableData;
 }
 function responseTables(data) {
-  return data.map(data => {
-    const tex = gl.createTexture();
+  return data.map((data, part) => {               // (part 1: one frequency, two channels)
+    const tex = gl.createTexture(), ch = part ? 2 : 4;
     gl.bindTexture(gl.TEXTURE_2D, tex);
     nearest(gl.TEXTURE_2D);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, NODES * ND, NA, 0, gl.RGBA, gl.FLOAT, data);
+    gl.texImage2D(gl.TEXTURE_2D, 0, FORMATS[ch].full[0], NODES * ND, NA, 0, FORMATS[ch].fmt, gl.FLOAT, data);
     if (LINEAR) {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -575,8 +583,8 @@ function allocate(tables) {
     mix: target(FX, FY),                         // the fitted light, transformed in y only
     page: target(FX, FY, true),                  // the page (linear sRGB)
     fit: [target(FX, FY, true), target(FX, FY, true)],   // the last fit (steady field), per part
-    L: layers(WW, HH, 2 * 2 * NODES),            // the bands: part, end, node
-    cur: [target(WW, HH, true), target(WW, HH, true)],   // the field now, on the window
+    L: [layers(WW, HH, 2 * NODES, 4), layers(WW, HH, 2 * NODES, 2)],   // the bands, per part: end, node
+    cur: [target(WW, HH, true), target(WW, HH, true, 2)],   // the field now, on the window
     see: target(WW, HH, true),                   // what it looks like (linear sRGB)
     E: responseTables(tables),                   // the response of each band
     A,                                           // the age of each window row's light
@@ -776,7 +784,7 @@ function* fitJob(row, iters) {
             gl.uniform1i(u.side, side); gl.uniform1i(u.node, node);
           }, s0, s1 - s0);
           a = fft(0, 'x', rows);
-          const layer = R.L.fbos[(part * 2 + side) * NODES + node];
+          const layer = R.L[part].fbos[side * NODES + node];
           // grid row g is page row row + g - OY, kept at slot mod(that, HH); in at most two runs
           for (let g = s0; g < s1;) {
             const slot = mod(row + g - OY, HH), n = Math.min(s1 - g, HH - slot);
@@ -827,7 +835,7 @@ function render() {
   gl.bindTexture(gl.TEXTURE_2D, R.A);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, HH, 1, gl.RED, gl.FLOAT, ageBuf);
   for (let part = 0; part < 2; part++) {
-    run(P.combine, R.cur[part].f, WW, HH, { L: [gl.TEXTURE_2D_ARRAY, R.L.t], E: R.E[part], A: R.A }, u => {
+    run(P.combine, R.cur[part].f, WW, HH, { L: [gl.TEXTURE_2D_ARRAY, R.L[part].t], E: R.E[part], A: R.A }, u => {
       gl.uniform1i(u.part, part); gl.uniform1i(u.base, mod(row - RING, HH));
       gl.uniform1i(u.hh, HH); gl.uniform1i(u.ww, WW);
       gl.uniform1f(u.cps, phys.cps); gl.uniform1f(u.tmax, phys.tmax); gl.uniform1f(u.amax, phys.amax);
@@ -1135,11 +1143,11 @@ function enableGlide() {
   for (const type of ['pointerdown', 'keydown', 'touchstart']) addEventListener(type, stopGlide, { passive: true });
 }
 
-// The GPU memory a grid takes (see allocate): per window point, the bands (2 parts x 2 ends x NODES)
-// and the field now and its colour (3), half floats; per transform point, 3 full-float and 3 half-float
-// targets; and the response tables.
+// The GPU memory a grid takes (see allocate): per window point, the bands (2 ends x NODES, 4 channels
+// for part 0 and 2 for part 1) and the field now (4 + 2) and its colour (4), half floats; per
+// transform point, 3 full-float and 3 half-float targets; and the response tables (4 + 2 channels).
 function gpuBytes(W, H, FX, FY) {
-  return (W + 2 * RING) * (H + 2 * RING) * (4 * NODES + 3) * 8 + FX * FY * (3 * 16 + 3 * 8) + 2 * NODES * ND * NA * 16;
+  return (W + 2 * RING) * (H + 2 * RING) * (2 * NODES * 6 + 10) * 2 + FX * FY * (3 * 16 + 3 * 8) + NODES * ND * NA * 6 * 4;
 }
 
 // The canvas is 100lvh tall, so a phone's URL bar showing or hiding does not resize the box.

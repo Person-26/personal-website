@@ -1,7 +1,8 @@
 // A worker for waves.js: the response tables, off the page's thread (they take a few hundred ms).
 // Each request: { id, tmax, bands, c } (c: waves.js's constants); the reply: { id, tables } (two
-// Float32Arrays, transferred) or { id, error }. The tables come from waves.wasm (Rust, in wasm/:
-// about twice as fast) or, if it did not load, from computeResponse here (the reference).
+// Float32Arrays, transferred: 4 channels for frequencies 0 and 1, 2 for frequency 2) or
+// { id, error }. The tables come from waves.wasm (Rust, in wasm/: about twice as fast) or, if it
+// did not load, from computeResponse here (the reference).
 'use strict';
 
 // For each frequency, band node (|kx| / k = 1 / s) and distance T (in light-seconds, 0..tmax):
@@ -115,6 +116,9 @@ self.onmessage = async ({ data: { id, tmax, bands, c } }) => {
     await wasmLoad;
     ({ RAMP, FS, NODES, ND, NA, FREQ } = c);
     const tables = wasm ? computeResponseWasm(tmax, c) : computeResponse(tmax, bands);
+    const one = new Float32Array(tables[1].length / 2);   // part 1 has one frequency: keep its 2 channels
+    for (let i = 0; i < one.length; i += 2) { one[i] = tables[1][2 * i]; one[i + 1] = tables[1][2 * i + 1]; }
+    tables[1] = one;
     self.postMessage({ id, tables }, tables.map(t => t.buffer));
   } catch (error) {
     self.postMessage({ id, error: String(error) });
